@@ -24,6 +24,11 @@ from nagapasha.engine.rate_limiter import (
 )
 from nagapasha.engine.runner import HttpRunner
 from nagapasha.models.request_model import ParameterModel, RequestModel
+from nagapasha.engagement import EngagementContext
+from nagapasha.scope import ScopeError
+
+import logging
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +195,9 @@ class PayloadLoop:
         max_requests: int = 1000,
         batch_size: int = 1,
         jwt_deadline: Optional[float] = None,
+        engagement_context: Optional[EngagementContext] = None,
+        allow_destructive: bool = False,
+        host_allowlist: Optional[list[str]] = None,
     ) -> None:
         self.request_model = request_model
         self.baseline = baseline_fingerprint
@@ -203,10 +211,27 @@ class PayloadLoop:
             refill_rate=rate_limit_pps,
         )
         self.rate_limiter = TokenBucketRateLimiter(config)
-        self.runner = HttpRunner(rate_limiter=self.rate_limiter)
+
+        # Stage 2.5: Exfiltration prevention
+        self.host_allowlist = host_allowlist
+
+        self.runner = HttpRunner(
+            rate_limiter=self.rate_limiter,
+            host_allowlist=self.host_allowlist,
+        )
 
         # JWT deadline (seconds before expiry to stop)
         self.jwt_deadline = jwt_deadline
+
+        # Stage 0: Scope enforcement
+        self.engagement_context = engagement_context
+        self.scope_checker = None
+        if engagement_context:
+            from nagapasha.scope import ScopeChecker
+            self.scope_checker = ScopeChecker(engagement_context)
+
+        # Stage 8.5: Destructive payload gate
+        self.allow_destructive = allow_destructive
 
         # Kill switch
         self._kill: asyncio.Event = asyncio.Event()
@@ -344,6 +369,12 @@ class PayloadLoop:
         # Process payloads in batches
         i = 0
         while i < len(self.payloads):
+            # Stage 0: Poll file-based kill switch from engagement context
+            if self.scope_checker is not None and self.scope_checker.context.is_kill_switch_active():
+                logger.warning("Kill switch activated — aborting payload loop")
+                self._kill.set()
+                break
+
             if self._kill.is_set():
                 break
 
@@ -361,8 +392,20 @@ class PayloadLoop:
 
             # Fire batch concurrently (if batch_size > 1)
             if self.batch_size > 1:
+                # Stage 88: Dedup check for concurrent batch mode
+                deduped_batch = []
+                for candidate in batch:
+                    if (candidate.identity_hash in self._fired_identities or
+                        any(c.identity_hash == candidate.identity_hash for c in deduped_batch)):
+                        logger.debug(f"Skipping duplicate in batch: {candidate.identity_hash[:8]}")
+                        self.no_diff_count += 1
+                        self._request_count += 1
+                        self.total_fired += 1
+                    else:
+                        deduped_batch.append(candidate)
+
                 results = await asyncio.gather(
-                    *[self._fire_single(candidate) for candidate in batch],
+                    *[self._fire_single(candidate) for candidate in deduped_batch],
                     return_exceptions=True,
                 )
                 # Convert any exceptions to error PayloadResults
@@ -373,8 +416,12 @@ class PayloadLoop:
                         delta=None,
                         elapsed=0.0,
                     )
-                    for candidate, r in zip(batch, results)
+                    for candidate, r in zip(deduped_batch, results)
                 ]
+                # Track fired identities
+                for candidate, result in zip(deduped_batch, results):
+                    if isinstance(result, PayloadResult):
+                        self._fired_identities.add(candidate.identity_hash)
             else:
                 # Sequential mode
                 results = []
@@ -392,6 +439,9 @@ class PayloadLoop:
                         # Track fired identity
                         self._fired_identities.add(candidate.identity_hash)
                         results.append(result)
+                    except ScopeError:
+                        # Scope errors should propagate (kill switch, out of scope, etc.)
+                        raise
                     except Exception as e:
                         error_result = PayloadResult(
                             candidate=candidate,
@@ -498,6 +548,46 @@ class PayloadLoop:
         Modifies the request_model in place to inject the payload, then sends.
         Restores original after.
         """
+        # Stage 0: Scope check
+        if self.scope_checker is not None:
+            self.scope_checker.check(
+                url=self.request_model.url,
+                method=self.request_model.method,
+                attack_class=candidate.attack_class,
+                description=f"{candidate.attack_class} on {candidate.parameter.name}",
+            )
+
+        # Stage 8.5: Destructive payload gate
+        if candidate.destructive and not self.allow_destructive:
+            logger.warning(
+                f"Refusing to fire destructive payload: {candidate.attack_class} "
+                f"on {candidate.parameter.name} — pass allow_destructive=True to enable"
+            )
+            return PayloadResult(
+                candidate=candidate,
+                status_code=0,
+                delta=None,
+                elapsed=0.0,
+                hit=False,
+            )
+
+        # Stage 2.5: Exfiltration prevention
+        if self.host_allowlist is not None:
+            from nagapasha.security.exfil import HostAllowlist
+            guard = HostAllowlist(allowed=self.host_allowlist)
+            if not guard.is_allowed(self.request_model.url):
+                logger.warning(
+                    f"Exfiltration blocked: {self.request_model.url} "
+                    f"not in allowlist: {self.host_allowlist}"
+                )
+                return PayloadResult(
+                    candidate=candidate,
+                    status_code=0,
+                    delta=None,
+                    elapsed=0.0,
+                    hit=False,
+                )
+
         param = candidate.parameter
         original_value = param.raw_value
 

@@ -47,12 +47,21 @@ class HttpRunner:
         rate_limiter: Optional[TokenBucketRateLimiter] = None,
         verify_ssl: bool = True,
         timeout: float = 30.0,
+        host_allowlist: Optional[list[str]] = None,
     ) -> None:
         self.rate_limiter = rate_limiter
         self.verify_ssl = verify_ssl
         self.timeout = timeout
         self._request_count: int = 0
         self._client = httpx.AsyncClient(verify=verify_ssl, timeout=timeout)
+
+        # Stage 2.5: Exfiltration prevention
+        self.host_allowlist = host_allowlist
+        if host_allowlist:
+            from nagapasha.security.exfil import HostAllowlist
+            self.exfil_guard = HostAllowlist(allowed=host_allowlist)
+        else:
+            self.exfil_guard = None
 
     async def send(self, request_model: RequestModel) -> HttpxResponse:
         """Send a request and return a structured response.
@@ -62,7 +71,19 @@ class HttpRunner:
 
         Returns:
             An HttpxResponse with captured status, headers, body, elapsed time.
+
+        Raises:
+            ValueError: If URL is out of scope (exfil guard)
         """
+        # Stage 2.5: Exfiltration prevention
+        if self.exfil_guard is not None:
+            url = self._build_url(request_model)
+            if not self.exfil_guard.is_allowed(url):
+                raise ValueError(
+                    f"URL out of scope (exfiltration prevention): {url} "
+                    f"not in allowlist: {self.host_allowlist}"
+                )
+
         if self.rate_limiter:
             await self.rate_limiter.acquire()
 

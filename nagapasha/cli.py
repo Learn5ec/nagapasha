@@ -92,13 +92,25 @@ def cicd(
         "sarif", "--output-format", "-f",
         help="Output format: json, sarif, junit, or all"
     ),
+    engagement: Optional[str] = typer.Option(
+        None, "--engagement", "-e", help="Path to .ctx engagement file"
+    ),
 ) -> None:
     """CI/CD integration: non-interactive security gating.
 
     Automatically runs the full pipeline with JSON/SARIF output and
     exits with code 1 if findings exceed the severity threshold.
     """
-    # Auto-confirm scope for CI/CD
+    # Load engagement context if provided
+    engagement_context = None
+    if engagement:
+        try:
+            from nagapasha.engagement import EngagementContext
+            engagement_context = EngagementContext.load(Path(engagement))
+        except Exception as e:
+            console.print(f"[red]Failed to load engagement context:[/red] {e}")
+            sys.exit(3)
+
     try:
         req = parse_curl(_strip_ansi_c_quotes(curl_command))
     except CurlParseError as e:
@@ -148,6 +160,8 @@ def cicd(
         rate_limit_pps=rate_config.refill_rate,
         rate_limit_burst=rate_config.burst,
         max_requests=max_requests,
+        engagement_context=engagement_context,
+        allow_destructive=engagement_context.settings.get("allow_destructive", False) if engagement_context else False,
     )
 
     results = asyncio.run(loop.run())
@@ -155,25 +169,26 @@ def cicd(
     # Create report
     from nagapasha.stages.stage12_reporting import Report
     report = Report(
-        engagement_id="cicd",
+        engagement_id=engagement_context.engagement_id if engagement_context else "cicd",
         target_url=req.url,
         method=req.method,
-        findings=[
-            {
-                "parameter_name": r.candidate.parameter.name,
-                "attack_class": r.candidate.attack_class,
-                "payload": r.candidate.payload,
-                "evidence": str(r._evidence()),
-                "confidence": 0.9 if r.classification == "HIT" else 0.5,
-            }
-            for r in loop.hits + loop.near_misses
-        ],
         summary={
             "total_fired": results["total_fired"],
             "hits": results["hits"],
             "near_misses": results["near_misses"],
         },
     )
+
+    # Add findings using add_finding() for redaction and hashing
+    for r in loop.hits + loop.near_misses:
+        confidence = 0.9 if r.classification == "HIT" else 0.5
+        report.add_finding(
+            parameter_name=r.candidate.parameter.name,
+            attack_class=r.candidate.attack_class,
+            payload=r.candidate.payload,
+            evidence=str(r._evidence()),
+            confidence=confidence,
+        )
 
     # Save report
     output_dir = Path("reports")
@@ -186,14 +201,21 @@ def cicd(
     console.print(f"  Near-misses: {results['near_misses']}")
     console.print(f"  Reports saved to: {output_dir}")
 
-    # Check severity threshold
+    # Check severity threshold based on --fail-on-severity
+    SEVERITY_THRESHOLDS = {
+        "low": 0.0,
+        "medium": 0.5,
+        "high": 0.8,
+        "critical": 0.95,
+    }
+    threshold = SEVERITY_THRESHOLDS.get(fail_on_severity.lower(), 0.8)
     high_severity_count = sum(
         1 for f in report.findings
-        if f.get("confidence", 0) >= 0.8
+        if f.get("confidence", 0) >= threshold
     )
 
     if high_severity_count > 0:
-        console.print(f"\n[red]FAIL: {high_severity_count} high-severity finding(s) detected[/red]")
+        console.print(f"\n[red]FAIL: {high_severity_count} {fail_on_severity}-severity or higher finding(s) detected[/red]")
         sys.exit(1)
     else:
         console.print("\n[green]PASS: No high-severity findings[/green]")
@@ -405,8 +427,21 @@ def recon(
     dry_run: bool = typer.Option(
         False, "--dry-run", "-d", help="Parse only, don't fire any requests"
     ),
+    engagement: Optional[str] = typer.Option(
+        None, "--engagement", "-e", help="Path to .ctx engagement file"
+    ),
 ) -> None:
     """Run parse + recon on a curl command."""
+    # Load engagement context if provided
+    engagement_context = None
+    if engagement:
+        try:
+            from nagapasha.engagement import EngagementContext
+            engagement_context = EngagementContext.load(Path(engagement))
+        except Exception as e:
+            console.print(f"[red]Failed to load engagement context:[/red] {e}")
+            sys.exit(3)
+
     try:
         req = parse_curl(_strip_ansi_c_quotes(curl_command))
     except CurlParseError as e:
@@ -418,9 +453,15 @@ def recon(
         _print_request_model(req)
         return
 
-    # Scope confirmation removed — user is responsible for authorization
-    scope_guard = ScopeGuard()
-    scope_guard.confirm_scope(f"User confirmed at {__import__('time').time()}")
+    # Stage 0: Scope check (if engagement context provided)
+    if engagement_context:
+        from nagapasha.scope import ScopeChecker
+        scope_checker = ScopeChecker(engagement_context)
+        scope_checker.check(
+            url=req.url,
+            method=req.method,
+            description="Recon scope check",
+        )
 
     # Run recon
     try:
@@ -622,17 +663,36 @@ def full(
     mcp_search: bool = typer.Option(
         False, "--mcp-search", help="Enable MCP web search fallback for payload sourcing"
     ),
+    engagement: Optional[str] = typer.Option(
+        None, "--engagement", "-e", help="Path to .ctx engagement file"
+    ),
 ) -> None:
     """Full pipeline: parse → recon → targeting → generate → execute."""
+    # Load engagement context if provided
+    engagement_context = None
+    if engagement:
+        try:
+            from nagapasha.engagement import EngagementContext
+            engagement_context = EngagementContext.load(Path(engagement))
+        except Exception as e:
+            console.print(f"[red]Failed to load engagement context:[/red] {e}")
+            sys.exit(3)
+
     try:
         req = parse_curl(_strip_ansi_c_quotes(curl_command))
     except CurlParseError as e:
         console.print(f"[red]Parse error:[/red] {e}")
         sys.exit(1)
 
-    # Scope confirmation removed — user is responsible for authorization
-    scope_guard = ScopeGuard()
-    scope_guard.confirm_scope("User confirmed via CLI at " + str(__import__('time').time()))
+    # Stage 0: Scope check (if engagement context provided)
+    if engagement_context:
+        from nagapasha.scope import ScopeChecker
+        scope_checker = ScopeChecker(engagement_context)
+        scope_checker.check(
+            url=req.url,
+            method=req.method,
+            description="Initial scope check",
+        )
 
     # Run recon
     try:
@@ -701,6 +761,11 @@ def full(
     console.print("\n[bold]Firing payloads...[/bold]")
     rate_config = recon_result.rate_limit_config or RateLimitConfig(burst=10, refill_rate=4.0)
 
+    # Parse allowed hosts from command line (if provided)
+    host_allowlist = None
+    if allowed_hosts:
+        host_allowlist = [h.strip() for h in allowed_hosts.split(",")]
+
     loop = PayloadLoop(
         request_model=req,
         baseline_fingerprint=baseline,
@@ -709,6 +774,9 @@ def full(
         rate_limit_burst=rate_config.burst,
         max_requests=max_requests,
         batch_size=batch_size,
+        engagement_context=engagement_context,
+        allow_destructive=engagement_context.settings.get("allow_destructive", False) if engagement_context else False,
+        host_allowlist=host_allowlist,
     )
 
     # Capture results
