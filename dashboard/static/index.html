@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>nagapasha — Adaptive AI-Powered Intruder</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/dashboard.css">
+  <script src="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.js"></script>
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header class="header">
+      <h1><i class="ti ti-shield-check"></i> nagapasha</h1>
+      <p>Adaptive AI-Powered Intruder — turn a curl request into a targeted attack suite.</p>
+    </header>
+
+    <!-- New Engagement Form -->
+    <section id="new-engagement" class="form-section" style="margin-bottom: 2rem;">
+      <h2 style="font-weight: 500; font-size: 1.125rem; margin-bottom: 1rem;">New Engagement</h2>
+      <form id="engagement-form">
+        <div class="form-group">
+          <label for="target-url">Target URL</label>
+          <input type="url" id="target-url" placeholder="https://example.com/api/v1/user" required>
+        </div>
+        <div class="form-group">
+          <label for="target-method">Method</label>
+          <input type="text" id="target-method" value="GET" placeholder="GET, POST, PUT, ...">
+        </div>
+        <div class="form-group">
+          <label for="target-notes">Notes (optional)</label>
+          <textarea id="target-notes" placeholder="Scope confirmation, authorization details..."></textarea>
+        </div>
+        <button type="submit" class="btn primary">
+          <i class="ti ti-player-play"></i> Start Engagement
+        </button>
+      </form>
+    </section>
+
+    <!-- Engagement List -->
+    <section id="engagement-list" style="margin-bottom: 2rem;">
+      <h2 style="font-weight: 500; font-size: 1.125rem; margin-bottom: 1rem;">Active Engagements</h2>
+      <div id="engagement-list-container" class="engagement-list">
+        <div class="empty-state">
+          <h3>No active engagements</h3>
+          <p>Submit a URL above to start a new engagement.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Live Run Detail -->
+    <section id="live-run" style="display: none;">
+      <!-- Stats cards -->
+      <div class="stat-cards">
+        <div class="stat-card">
+          <div class="label">Status</div>
+          <div class="value" id="stat-status">
+            <span class="status-badge running">running</span>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="label">Requests Fired</div>
+          <div class="value" id="stat-fired">0</div>
+        </div>
+        <div class="stat-card">
+          <div class="label">Hits</div>
+          <div class="value" id="stat-hits" style="color: var(--danger-text);">0</div>
+        </div>
+        <div class="stat-card">
+          <div class="label">Near-misses</div>
+          <div class="value" id="stat-near-misses" style="color: var(--warning-text);">0</div>
+        </div>
+        <div class="stat-card">
+          <div class="label">Payloads</div>
+          <div class="value" id="stat-payloads">0</div>
+        </div>
+      </div>
+
+      <!-- Progress bar -->
+      <div class="progress-container">
+        <div class="progress-label">
+          <span>Progress</span>
+          <span id="progress-percent">0%</span>
+        </div>
+        <div class="progress-bar">
+          <div class="progress-fill" id="progress-fill" style="width: 0%;"></div>
+        </div>
+      </div>
+
+      <!-- Action buttons -->
+      <div class="action-row">
+        <button id="btn-pause" class="btn primary" disabled>
+          <i class="ti ti-player-pause"></i> Pause
+        </button>
+        <button id="btn-resume" class="btn" disabled>
+          <i class="ti ti-player-play"></i> Resume
+        </button>
+        <button id="btn-kill" class="btn danger" disabled>
+          <i class="ti ti-square"></i> Kill
+        </button>
+      </div>
+
+      <!-- Findings feed -->
+      <div class="findings-section">
+        <h2><i class="ti ti-alert-triangle"></i> Findings</h2>
+        <div id="findings-feed" class="findings-feed">
+          <div class="empty-state">
+            <h3>No findings yet</h3>
+            <p>Findings will appear here as payloads are fired.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script src="/static/js/live-run.js"></script>
+</body>
+</html>

@@ -1,0 +1,27 @@
+# Example Rules of Engagement (ROE) for testing
+target_hosts:
+  - example.com
+  - "*.example.com"
+
+excluded_hosts:
+  - "cdn.example.com"
+
+allowed_methods:
+  - GET
+  - POST
+
+# Optional: exclude destructive attack classes
+# allowed_attack_classes:
+#   - sql_injection
+#   - xss
+#   - lfi
+#   - idor
+#   - path_traversal
+
+# Optional: time window
+# time_window:
+#   start: "2026-08-21T00:00:00"
+#   end: "2026-08-22T00:00:00"
+
+authorized_by: "test@example.com"
+notes: "Test engagement for CLI validation"
