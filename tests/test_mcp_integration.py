@@ -95,7 +95,7 @@ class TestSearchMCPOnline:
             "status": "ok",
             "data": {
                 "sql_injection": [
-                    {"value": "' OR 1=1--", "technique": "test"},
+                    {"value": "' OR 1=1--", "technique": "test", "source": "https://github.com/danielmiessler/SecLists"},
                 ]
             },
         })
@@ -103,6 +103,38 @@ class TestSearchMCPOnline:
         result = await _search_mcp_online(runner, ["sql_injection"], None, 120)
         assert "sql_injection" in result
         assert len(result["sql_injection"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_drops_payloads_without_source(self):
+        """Payloads without a source URL should be dropped by provenance vetting."""
+        runner = MagicMock(spec=AnthropicRunner)
+        runner.invoke = AsyncMock(return_value={
+            "status": "ok",
+            "data": {
+                "sql_injection": [
+                    {"value": "' OR 1=1--", "technique": "test"},
+                ]
+            },
+        })
+
+        result = await _search_mcp_online(runner, ["sql_injection"], None, 120)
+        assert result is None or len(result.get("sql_injection", [])) == 0
+
+    @pytest.mark.asyncio
+    async def test_drops_payloads_from_unvetted_source(self):
+        """Payloads from unvetted sources should be skipped in non-interactive mode."""
+        runner = MagicMock(spec=AnthropicRunner)
+        runner.invoke = AsyncMock(return_value={
+            "status": "ok",
+            "data": {
+                "sql_injection": [
+                    {"value": "' OR 1=1--", "technique": "test", "source": "https://unknown-bad-site.com/payloads"},
+                ]
+            },
+        })
+
+        result = await _search_mcp_online(runner, ["sql_injection"], None, 120)
+        assert result is None or len(result.get("sql_injection", [])) == 0
 
     @pytest.mark.asyncio
     async def test_runner_failure_returns_none(self):

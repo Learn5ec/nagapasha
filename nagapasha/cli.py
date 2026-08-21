@@ -95,6 +95,10 @@ def cicd(
     engagement: Optional[str] = typer.Option(
         None, "--engagement", "-e", help="Path to .ctx engagement file"
     ),
+    no_authorization_required: bool = typer.Option(
+        False, "--no-authorization-required",
+        help="Explicitly disable security gates (not recommended for live targets)",
+    ),
 ) -> None:
     """CI/CD integration: non-interactive security gating.
 
@@ -116,6 +120,16 @@ def cicd(
     except CurlParseError as e:
         console.print(f"[red]Parse error:[/red] {e}")
         sys.exit(1)
+
+    # Authorization gate: fail if firing requests without engagement context
+    _check_authorization(engagement_context, dry_run=False, firing_requests=True)
+
+    # If --no-authorization-required, warn but proceed without gates
+    if not engagement_context and no_authorization_required:
+        console.print(
+            "[yellow]Warning:[/yellow] Running without authorization context. "
+            "Security gates (scope, destructive, kill switch) are disabled."
+        )
 
     # Run recon
     try:
@@ -453,6 +467,9 @@ def recon(
         _print_request_model(req)
         return
 
+    # Authorization gate: fail if firing requests without engagement context
+    _check_authorization(engagement_context, dry_run=False, firing_requests=True)
+
     # Stage 0: Scope check (if engagement context provided)
     if engagement_context:
         from nagapasha.scope import ScopeChecker
@@ -586,6 +603,44 @@ def generate(
         console.print(f"  Engagement ID: {eid}")
 
 
+def _check_authorization(
+    engagement_context: Optional[Any],
+    dry_run: bool,
+    firing_requests: bool,
+) -> None:
+    """Validate that authorization is configured before proceeding.
+
+    When firing network requests without --engagement, security gates
+    (scope, destructive, kill switch) silently no-op. This is a security
+    risk. We hard-fail unless --dry-run is set or --no-authorization-required
+    is explicitly passed.
+
+    Args:
+        engagement_context: Loaded EngagementContext, or None
+        dry_run: Whether --dry-run was passed
+        firing_requests: Whether we are about to fire network requests
+    """
+    if dry_run:
+        # Dry run never sends network requests — allow without engagement
+        return
+    if not firing_requests:
+        # Recon-only or parse-only — no network calls
+        return
+    if engagement_context is not None:
+        # Authorization is configured
+        return
+    # No engagement and no dry-run — security risk
+    console.print(
+        "[red]Error:[/red] No authorization context configured. "
+        "Pass --engagement to a .ctx file, or use --dry-run to skip network calls."
+    )
+    console.print(
+        "[dim]  Nagapasha security gates (scope, destructive-payload, kill switch) "
+        "are disabled without an engagement context.[/dim]"
+    )
+    sys.exit(3)
+
+
 def _on_result(result) -> None:
     """Print each payload result for the run/full commands."""
     classification = result.classification
@@ -666,6 +721,10 @@ def full(
     engagement: Optional[str] = typer.Option(
         None, "--engagement", "-e", help="Path to .ctx engagement file"
     ),
+    no_authorization_required: bool = typer.Option(
+        False, "--no-authorization-required",
+        help="Explicitly disable security gates (not recommended for live targets)",
+    ),
 ) -> None:
     """Full pipeline: parse → recon → targeting → generate → execute."""
     # Load engagement context if provided
@@ -683,6 +742,16 @@ def full(
     except CurlParseError as e:
         console.print(f"[red]Parse error:[/red] {e}")
         sys.exit(1)
+
+    # Authorization gate: fail if firing requests without engagement context
+    _check_authorization(engagement_context, dry_run, firing_requests=not dry_run)
+
+    # If --no-authorization-required, warn but proceed without gates
+    if not engagement_context and not dry_run and no_authorization_required:
+        console.print(
+            "[yellow]Warning:[/yellow] Running without authorization context. "
+            "Security gates (scope, destructive, kill switch) are disabled."
+        )
 
     # Stage 0: Scope check (if engagement context provided)
     if engagement_context:
@@ -1028,6 +1097,17 @@ def init_engagement(
     # Hash ROE for audit trail
     from nagapasha.engagement import hash_roe
     roe_hash = hash_roe(roe_content)
+
+    # Warn if HMAC key is not set — engagement will be unsigned
+    from nagapasha.utils.config import get_config
+    hmac_key = get_config().get("engagement_hmac_key", "")
+    if not hmac_key:
+        console.print(
+            "[yellow]Warning:[/yellow] NAGAPASHA_HMAC_KEY is not set. "
+            "The engagement context will be created with an unsigned 'dev_' signature. "
+            "All subsequent commands will skip signature verification. "
+            "Set NAGAPASHA_HMAC_KEY or add engagement_hmac_key to config for tamper-proof engagements."
+        )
 
     # Extract scope from ROE
     from nagapasha.engagement import validate_roe

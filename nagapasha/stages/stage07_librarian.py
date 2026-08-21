@@ -125,6 +125,7 @@ async def _search_mcp_online(
 
     The LLM agent is prompted to use MCP tools to search the internet for
     relevant payloads, wordlists, and technique documentation.
+    Results are then vetted against the provenance allowlist (Stage 2.5).
     """
     if not runner:
         logger.debug("Librarian: no runner, skipping MCP search")
@@ -136,7 +137,8 @@ async def _search_mcp_online(
         "use_mcp": True,
         "constraint": (
             "Output ONLY valid JSON. No markdown fences. No commentary. "
-            "Use the MCP web_search tool to find payloads when local KB is insufficient."
+            "Use the MCP web_search tool to find payloads when local KB is insufficient. "
+            "Include a 'source' field in each payload dict with the URL where the payload was found."
         ),
     }
 
@@ -155,7 +157,77 @@ async def _search_mcp_online(
         logger.warning("Librarian: MCP search returned non-dict data")
         return None
 
-    return data
+    # Stage 2.5: Vet provenance of MCP-sourced payloads
+    vetted = _vet_mcp_payloads(data)
+    if vetted:
+        logger.info(
+            f"Librarian: MCP search vetted {sum(len(v) for v in vetted.values())} "
+            f"payloads from {len(vetted)} attack classes"
+        )
+    return vetted
+
+
+def _vet_mcp_payloads(data: dict[str, Any]) -> dict[str, Any]:
+    """Filter MCP-sourced payloads through provenance check (Stage 2.5).
+
+    Each payload from MCP search may carry a 'source' field with the URL
+    where the LLM found it. We check that URL against the provenance
+    allowlist. Payloads without a source URL or from unvetted sources
+    are dropped.
+
+    Args:
+        data: Dict mapping attack_class -> list of payload dicts.
+
+    Returns:
+        Vetted dict with same structure, containing only provenance-verified payloads.
+    """
+    from nagapasha.utils.payload_provenance import is_source_vetted, require_human_approval
+
+    vetted: dict[str, Any] = {}
+    interactive = _is_interactive()
+
+    for attack_class, payloads in data.items():
+        if not isinstance(payloads, list):
+            continue
+        vetted_payloads: list[Any] = []
+        for payload in payloads:
+            if isinstance(payload, dict):
+                source = payload.get("source", "")
+                if not source:
+                    # No source URL — cannot verify provenance, drop
+                    logger.debug(
+                        f"Librarian: dropping payload from '{attack_class}' "
+                        f"(no source URL)"
+                    )
+                    continue
+                if is_source_vetted(source):
+                    vetted_payloads.append(payload)
+                    continue
+                # Unvetted source — require human approval
+                source_name = source.split("/")[2] if "/" in source else source
+                approved = require_human_approval(source_name, interactive)
+                if approved:
+                    vetted_payloads.append(payload)
+                else:
+                    logger.info(
+                        f"Librarian: skipping unvetted source '{source_name}' "
+                        f"for attack class '{attack_class}'"
+                    )
+            else:
+                # Plain string payload with no metadata — drop
+                logger.debug(
+                    f"Librarian: dropping non-dict payload from '{attack_class}'"
+                )
+        if vetted_payloads:
+            vetted[attack_class] = vetted_payloads
+
+    return vetted
+
+
+def _is_interactive() -> bool:
+    """Check if running in an interactive (TTY) context."""
+    import sys
+    return bool(sys.stdin.isatty())
 
 
 def _enrich_with_llm(
@@ -165,12 +237,18 @@ def _enrich_with_llm(
     tech_stack: Optional[dict[str, Any]],
     timeout: int,
 ) -> Optional[dict[str, Any]]:
-    """Enrich local KB results with LLM-sourced payloads."""
+    """Enrich local KB results with LLM-sourced payloads.
+
+    LLM-sourced payloads are vetted through provenance check (Stage 2.5).
+    """
     context = {
         "attack_classes": attack_classes,
         "existing_payloads": existing_payloads,
         "tech_stack": tech_stack or {},
-        "constraint": "Output ONLY valid JSON. No markdown fences. No commentary.",
+        "constraint": (
+            "Output ONLY valid JSON. No markdown fences. No commentary. "
+            "Include a 'source' field in each payload dict with the URL where the payload was found."
+        ),
     }
 
     try:
@@ -185,7 +263,7 @@ def _enrich_with_llm(
     if not isinstance(data, dict):
         return None
 
-    return data
+    return _vet_mcp_payloads(data)
 
 
 def get_default_payloads() -> dict[str, Any]:
