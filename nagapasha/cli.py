@@ -99,6 +99,9 @@ def cicd(
         False, "--no-authorization-required",
         help="Explicitly disable security gates (not recommended for live targets)",
     ),
+    mcp_search: bool = typer.Option(
+        False, "--mcp-search", help="Enable MCP web search fallback for payload sourcing"
+    ),
 ) -> None:
     """CI/CD integration: non-interactive security gating.
 
@@ -136,7 +139,7 @@ def cicd(
     req = run_targeting(req, auto=True)
 
     # Build payloads
-    payloads = _build_payload_candidates(req)
+    payloads = asyncio.run(_build_payload_candidates(req, mcp_search=mcp_search))
 
     if not payloads:
         console.print("[yellow]No payloads generated.[/yellow]")
@@ -813,7 +816,7 @@ def full(
     console.print(f"\n[green]Phase 1 script:[/green] {script_path}")
 
     # Build payloads from attack_specs
-    payloads = _build_payload_candidates(req)
+    payloads = asyncio.run(_build_payload_candidates(req, mcp_search=mcp_search))
     console.print(f"[bold]Payloads ready:[/bold] {len(payloads)}")
 
     if not payloads:
@@ -915,7 +918,7 @@ def _location_sort_key(param: ParameterModel) -> tuple[int, str]:
     return (loc_priority, param.name)
 
 
-def _build_payload_candidates(
+async def _build_payload_candidates(
     req: RequestModel,
     mcp_search: bool = False,
 ) -> list[PayloadCandidate]:
@@ -987,14 +990,14 @@ def _build_payload_candidates(
 
             runner = AnthropicRunner()
             try:
-                payloads_dict = run_librarian(
+                payloads_dict = await run_librarian(
                     attack_classes=attack_classes,
                     tech_stack=req.confirmed_tech_stack,
                     runner=runner,
                     use_mcp=True,
                 )
             finally:
-                runner.close()
+                await runner.close()
 
             if payloads_dict:
                 # Convert to PayloadCandidate format
