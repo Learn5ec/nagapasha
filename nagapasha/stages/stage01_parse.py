@@ -145,6 +145,8 @@ def parse_curl(curl_command: str) -> RequestModel:
         -u 'user:pass' (basic auth)
         -k (insecure, ignored for parsing)
 
+    If method is not explicitly specified via -X, prompts the user to confirm.
+
     Args:
         curl_command: The full curl command as a string.
 
@@ -164,13 +166,14 @@ def parse_curl(curl_command: str) -> RequestModel:
         raise CurlParseError("Command must start with 'curl'")
 
     # Parse flags
-    method = "GET"
+    method = ""  # Empty until confirmed
     url = ""
     headers: dict[str, str] = {}
     cookies: dict[str, str] = {}
     body: Optional[str] = None
     data_urlencode: dict[str, str] = {}
     basic_auth: Optional[str] = None
+    has_data_flag = False  # Track if -d, --data-binary, or --data-urlencode present
 
     i = 1
     while i < len(tokens):
@@ -179,16 +182,8 @@ def parse_curl(curl_command: str) -> RequestModel:
         if token == "-X" and i + 1 < len(tokens):
             method = tokens[i + 1].upper()
             i += 2
-        elif token == "-H":
-            if i + 1 < len(tokens):
-                h = tokens[i + 1]
-                if ":" in h:
-                    key, _, val = h.partition(":")
-                    headers[key.strip()] = val.strip()
-                i += 2
-            else:
-                i += 1
-        elif token == "-d":
+        elif token == "-d" or token == "--data" or token == "--data-raw":
+            has_data_flag = True
             if i + 1 < len(tokens):
                 d = tokens[i + 1]
                 if d.startswith("@"):
@@ -204,6 +199,7 @@ def parse_curl(curl_command: str) -> RequestModel:
             else:
                 i += 1
         elif token == "--data-binary":
+            has_data_flag = True
             if i + 1 < len(tokens):
                 d = tokens[i + 1]
                 if d.startswith("@"):
@@ -218,11 +214,21 @@ def parse_curl(curl_command: str) -> RequestModel:
             else:
                 i += 1
         elif token == "--data-urlencode":
+            has_data_flag = True
             if i + 1 < len(tokens):
                 de = tokens[i + 1]
                 if "=" in de:
                     k, _, v = de.partition("=")
                     data_urlencode[k.strip()] = v.strip()
+                i += 2
+            else:
+                i += 1
+        elif token == "-H":
+            if i + 1 < len(tokens):
+                h = tokens[i + 1]
+                if ":" in h:
+                    key, _, val = h.partition(":")
+                    headers[key.strip()] = val.strip()
                 i += 2
             else:
                 i += 1
@@ -389,6 +395,23 @@ def parse_curl(curl_command: str) -> RequestModel:
             is_fuzz_target=False,
             do_not_fuzz=is_auth_param(name),
         ))
+
+    # Auto-detect method if not explicitly specified
+    if not method:
+        import logging
+        logger = logging.getLogger(__name__)
+
+        # If data flags were present, auto-detect POST
+        if has_data_flag:
+            logger.info("Auto-detected POST method from -d/--data/--data-raw/--data-binary flags")
+            method = "POST"
+        else:
+            # No data, no method specified - default to GET with warning
+            logger.warning(
+                "HTTP method not specified in curl command. Defaulting to GET. "
+                "Use -X METHOD flag to specify the method (GET, POST, PUT, PATCH, DELETE, etc.)"
+            )
+            method = "GET"
 
     return RequestModel(
         method=method,

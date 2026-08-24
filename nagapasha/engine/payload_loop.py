@@ -595,9 +595,14 @@ class PayloadLoop:
         # Capture original body before any modifications
         original_req = RequestModel(
             url=self.request_model.url,
+            base_url=self.request_model.base_url,
             method=self._original_method,
             headers=dict(self.request_model.headers),
+            cookies=dict(self.request_model.cookies),
             body=self._original_body,
+            body_type=self.request_model.body_type,
+            query_params=dict(self.request_model.query_params),
+            path_segments=list(self.request_model.path_segments),
             parameters=list(self.request_model.parameters),
         )
 
@@ -672,9 +677,15 @@ class PayloadLoop:
         # Build modified request model
         modified = self._build_request_with_payload(param, candidate.payload)
 
+        # Log payload being fired
+        logger.info(f"FIRING PAYLOAD: [{candidate.attack_class}] {candidate.parameter.name}={candidate.payload[:100]}")
+
         # Send
         resp = await self.runner.send(modified)
         elapsed = resp.elapsed
+
+        # Log response
+        logger.info(f"PAYLOAD RESPONSE: {resp.status_code} ({elapsed:.3f}s) - {candidate.attack_class} on {candidate.parameter.name}")
 
         # Compute delta
         delta = compute_delta(

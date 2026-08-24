@@ -14,9 +14,12 @@ from typing import Any, Optional
 from urllib.parse import urlparse, urlencode, parse_qs
 
 import httpx
+import logging
 
 from nagapasha.engine.rate_limiter import TokenBucketRateLimiter, RateLimitConfig
 from nagapasha.models.request_model import RequestModel
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -127,6 +130,15 @@ class HttpRunner:
             elapsed=elapsed,
             url=str(resp.url),
         )
+
+        # Log request/response details
+        logger.info(f"REQUEST: {request_model.method} {url}")
+        logger.debug(f"  Headers: {dict(request_model.headers)}")
+        if request_model.body:
+            logger.debug(f"  Body (truncated): {request_model.body[:200]}")
+        logger.info(f"RESPONSE: {resp.status_code} ({elapsed:.3f}s)")
+        if resp.text:
+            logger.debug(f"  Response body (truncated): {resp.text[:200]}")
 
         # Feed back to rate limiter
         if self.rate_limiter:

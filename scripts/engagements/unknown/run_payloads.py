@@ -18,10 +18,10 @@ from typing import Optional, Any
 # ---------------------------------------------------------------------------
 # Configuration (from the planning stages)
 # ---------------------------------------------------------------------------
-BASE_URL = 'https://ob-lms-api.officebeacon.net'
-METHOD = 'PATCH'
-HEADERS = {'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate, br', 'Accept-Language': 'en-GB,en;q=0.9', 'Authorization': 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhdXRoMHw2OTY0Nzc0OWRlMDhjYWY5ZmZjMmU5MmEiLCJ1c2VySWQiOiIwODBhOTZiYy0wNzQ5LTRlYWYtYjcyYi04NmZlN2NkZDY1OWQiLCJlbWFpbCI6InByaXlhbUB3ZWJlbGlnaHQuY28uaW4iLCJyb2xlIjoiYWRtaW4iLCJpYXQiOjE3ODcyMTY5MDEsImV4cCI6MTc4NzIyMDUwMX0.NVHlX5qgzBRDp4NByEzftzZqe_lj9j3TPCVlmeVIc90', 'Connection': 'keep-alive', 'Content-Length': '16', 'Content-Type': 'application/json', 'Host': 'ob-lms-api.officebeacon.net', 'Origin': 'https://ob-lms.officebeacon.net', 'Priority': 'u=1, i', 'Referer': 'https://ob-lms.officebeacon.net/', 'Sec-Ch-Ua': '"Not;A=Brand";v="8", "Chromium";v="150"', 'Sec-Ch-Ua-Mobile': '?0', 'Sec-Ch-Ua-Platform': '"Linux"', 'Sec-Fetch-Dest': 'empty', 'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Site': 'same-site', 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36'}
-COOKIES = {'lms-atk': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhdXRoMHw2OTY0Nzc0OWRlMDhjYWY5ZmZjMmU5MmEiLCJ1c2VySWQiOiIwODBhOTZiYy0wNzQ5LTRlYWYtYjcyYi04NmZlN2NkZDY1OWQiLCJlbWFpbCI6InByaXlhbUB3ZWJlbGlnaHQuY28uaW4iLCJyb2xlIjoiYWRtaW4iLCJpYXQiOjE3ODcyMTY5MDEsImV4cCI6MTc4NzIyMDUwMX0.NVHlX5qgzBRDp4NByEzftzZqe_lj9j3TPCVlmeVIc90', 'refresh_token': '8cbb38e96853ca95c93c894a7f692a5dbf8249dce8fb75f0a1f71876e1f6f93999428f888168638d20d1784c195d7fe46f55b6133d293cb9bad889381bed7e38'}
+BASE_URL = 'https://preview.owasp-juice.shop'
+METHOD = 'POST'
+HEADERS = {'accept': 'application/json', 'content-type': 'application/json'}
+COOKIES = {}
 
 # Rate limit: 10 burst, 4.0 req/s
 RATE_LIMIT_BURST = 10

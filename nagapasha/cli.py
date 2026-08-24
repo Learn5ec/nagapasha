@@ -770,8 +770,18 @@ def full(
         False, "--no-authorization-required",
         help="Explicitly disable security gates (not recommended for live targets)",
     ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Enable verbose logging (request/response details)"
+    ),
 ) -> None:
     """Full pipeline: parse → recon → targeting → generate → execute."""
+    # Configure logging
+    log_level = "DEBUG" if verbose else "INFO"
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
     # Load engagement context if provided
     engagement_context = None
     if engagement:
@@ -1477,4 +1487,4 @@ def engagement_status(
 
 
 if __name__ == "__main__":
-    main()
+    app()
