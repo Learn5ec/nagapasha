@@ -26,12 +26,20 @@ class Report:
         method: Optional[str] = None,
         findings: Optional[list[dict[str, Any]]] = None,
         summary: Optional[dict[str, Any]] = None,
+        authorization_context: Optional[str] = None,
     ) -> None:
         self.engagement_id = engagement_id
         self.target_url = target_url
         self.method = method
         self.findings = findings or []
         self.summary = summary or {}
+        self.authorization_context = authorization_context
+
+    def _default_auth_context(self) -> str:
+        """Return default authorization context message."""
+        if self.engagement_id:
+            return f"engagement_id={self.engagement_id}"
+        return "none (--no-authorization-required)"
 
     def add_finding(
         self,
@@ -88,6 +96,7 @@ class Report:
         """Serialize report to JSON."""
         return json.dumps({
             "engagement_id": self.engagement_id,
+            "authorization_context": self.authorization_context or self._default_auth_context(),
             "target_url": self.target_url,
             "method": self.method,
             "generated_at": datetime.utcnow().isoformat() + "Z",
@@ -128,6 +137,19 @@ class Report:
                             "rules": rules,
                         }
                     },
+                    "invocations": [
+                        {
+                            "toolConfigurationSuccessfulInvocations": [
+                                {
+                                    "executionSuccessful": True,
+                                    "output": json.dumps({
+                                        "engagement_id": self.engagement_id,
+                                        "authorization_context": self.authorization_context or self._default_auth_context(),
+                                    })
+                                }
+                            ]
+                        }
+                    ],
                     "results": [
                         {
                             "ruleId": finding["attack_class"],
@@ -205,11 +227,13 @@ class Report:
             "    tr:nth-child(even) { background-color: #f2f2f2; }",
             "    .confirmed { color: #d32f2f; font-weight: bold; }",
             "    .near_miss { color: #f57c00; }",
+            "    .authorization { color: #666; font-style: italic; }",
             "  </style>",
             "</head>",
             "<body>",
             "  <h1>nagapasha Security Report</h1>",
             f"  <p><strong>Engagement:</strong> {self.engagement_id or 'N/A'}</p>",
+            f"  <p class=\"authorization\"><strong>Authorization Context:</strong> {self.authorization_context or self._default_auth_context()}</p>",
             f"  <p><strong>Target:</strong> {self.target_url or 'N/A'}</p>",
             f"  <p><strong>Method:</strong> {self.method or 'N/A'}</p>",
             f"  <p><strong>Generated:</strong> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}</p>",
@@ -252,6 +276,7 @@ class Report:
             f"# Security Testing Report",
             f"",
             f"**Engagement ID:** {self.engagement_id or 'N/A'}",
+            f"**Authorization Context:** {self.authorization_context or self._default_auth_context()}",
             f"**Target:** {self.target_url or 'N/A'}",
             f"**Method:** {self.method or 'N/A'}",
             f"**Generated:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}",

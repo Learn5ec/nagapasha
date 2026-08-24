@@ -122,14 +122,8 @@ def cicd(
         sys.exit(1)
 
     # Authorization gate: fail if firing requests without engagement context
-    _check_authorization(engagement_context, dry_run=False, firing_requests=True)
-
-    # If --no-authorization-required, warn but proceed without gates
-    if not engagement_context and no_authorization_required:
-        console.print(
-            "[yellow]Warning:[/yellow] Running without authorization context. "
-            "Security gates (scope, destructive, kill switch) are disabled."
-        )
+    _check_authorization(engagement_context, dry_run=False, firing_requests=True,
+                         no_authorization_required=no_authorization_required)
 
     # Run recon
     try:
@@ -182,6 +176,11 @@ def cicd(
 
     # Create report
     from nagapasha.stages.stage12_reporting import Report
+    authorization_context = (
+        f"engagement_id={engagement_context.engagement_id}"
+        if engagement_context
+        else "none (--no-authorization-required)"
+    )
     report = Report(
         engagement_id=engagement_context.engagement_id if engagement_context else "cicd",
         target_url=req.url,
@@ -191,6 +190,7 @@ def cicd(
             "hits": results["hits"],
             "near_misses": results["near_misses"],
         },
+        authorization_context=authorization_context,
     )
 
     # Add findings using add_finding() for redaction and hashing
@@ -444,6 +444,10 @@ def recon(
     engagement: Optional[str] = typer.Option(
         None, "--engagement", "-e", help="Path to .ctx engagement file"
     ),
+    no_authorization_required: bool = typer.Option(
+        False, "--no-authorization-required",
+        help="Explicitly disable security gates (not recommended for live targets)",
+    ),
 ) -> None:
     """Run parse + recon on a curl command."""
     # Load engagement context if provided
@@ -468,7 +472,8 @@ def recon(
         return
 
     # Authorization gate: fail if firing requests without engagement context
-    _check_authorization(engagement_context, dry_run=False, firing_requests=True)
+    _check_authorization(engagement_context, dry_run=False, firing_requests=True,
+                         no_authorization_required=no_authorization_required)
 
     # Stage 0: Scope check (if engagement context provided)
     if engagement_context:
@@ -607,6 +612,7 @@ def _check_authorization(
     engagement_context: Optional[Any],
     dry_run: bool,
     firing_requests: bool,
+    no_authorization_required: bool = False,
 ) -> None:
     """Validate that authorization is configured before proceeding.
 
@@ -619,6 +625,7 @@ def _check_authorization(
         engagement_context: Loaded EngagementContext, or None
         dry_run: Whether --dry-run was passed
         firing_requests: Whether we are about to fire network requests
+        no_authorization_required: Whether user explicitly passed the opt-out flag
     """
     if dry_run:
         # Dry run never sends network requests — allow without engagement
@@ -629,10 +636,19 @@ def _check_authorization(
     if engagement_context is not None:
         # Authorization is configured
         return
+    if no_authorization_required:
+        # Explicit opt-out — proceed, but make it loud, not just a one-time
+        # line easy to miss in scrollback.
+        console.print(
+            "[yellow]Warning:[/yellow] Running without authorization context. "
+            "Security gates (scope, destructive-payload, kill switch) are DISABLED."
+        )
+        return
     # No engagement and no dry-run — security risk
     console.print(
         "[red]Error:[/red] No authorization context configured. "
-        "Pass --engagement to a .ctx file, or use --dry-run to skip network calls."
+        "Pass --engagement to a .ctx file, --dry-run to skip network calls, "
+        "or --no-authorization-required to explicitly disable gates."
     )
     console.print(
         "[dim]  Nagapasha security gates (scope, destructive-payload, kill switch) "
@@ -744,14 +760,8 @@ def full(
         sys.exit(1)
 
     # Authorization gate: fail if firing requests without engagement context
-    _check_authorization(engagement_context, dry_run, firing_requests=not dry_run)
-
-    # If --no-authorization-required, warn but proceed without gates
-    if not engagement_context and not dry_run and no_authorization_required:
-        console.print(
-            "[yellow]Warning:[/yellow] Running without authorization context. "
-            "Security gates (scope, destructive, kill switch) are disabled."
-        )
+    _check_authorization(engagement_context, dry_run, firing_requests=not dry_run,
+                         no_authorization_required=no_authorization_required)
 
     # Stage 0: Scope check (if engagement context provided)
     if engagement_context:

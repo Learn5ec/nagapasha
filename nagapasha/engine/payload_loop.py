@@ -368,6 +368,7 @@ class PayloadLoop:
 
         # Process payloads in batches
         i = 0
+        _no_auth_reminder_time: Optional[float] = None
         while i < len(self.payloads):
             # Stage 0: Poll file-based kill switch from engagement context
             if self.scope_checker is not None and self.scope_checker.context.is_kill_switch_active():
@@ -377,6 +378,17 @@ class PayloadLoop:
 
             if self._kill.is_set():
                 break
+
+            # Periodic reminder: when running without engagement context, log
+            # once per batch so it stays visible without per-request noise.
+            if self.engagement_context is None:
+                now = time.monotonic()
+                if _no_auth_reminder_time is None or now - _no_auth_reminder_time >= 30.0:
+                    logger.warning(
+                        "Running without engagement context — scope, destructive-payload, "
+                        "and kill-switch gates are disabled for this run."
+                    )
+                    _no_auth_reminder_time = now
 
             # Check max requests
             if self._request_count >= self.max_requests:
