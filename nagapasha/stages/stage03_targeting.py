@@ -18,6 +18,20 @@ from nagapasha.models.request_model import ParameterModel, RequestModel
 
 console = Console()
 
+# Protocol-level headers that shouldn't be fuzzed
+# These are computed by the HTTP client or have near-zero attack surface
+HOP_BY_HOP_HEADERS = {
+    "Content-Length",
+    "Connection",
+    "Transfer-Encoding",
+    "Keep-Alive",
+    "Proxy-Authenticate",
+    "Proxy-Authorization",
+    "Te",
+    "Trailer",
+    "Upgrade",
+}
+
 
 def run_targeting(
     request_model: RequestModel,
@@ -100,9 +114,12 @@ def run_targeting(
 
 
 def _auto_target(request_model: RequestModel) -> RequestModel:
-    """Auto-select: fuzz all non-auth, non-flaky parameters."""
+    """Auto-select: fuzz all non-auth, non-flaky, non-hop-by-hop parameters."""
     for param in request_model.parameters:
         if param.do_not_fuzz:
+            continue
+        # Skip protocol-level headers that shouldn't be fuzzed
+        if param.location == "header" and param.name in HOP_BY_HOP_HEADERS:
             continue
         param.is_fuzz_target = True
         param.do_not_fuzz = False

@@ -25,6 +25,7 @@ class TriageResult:
     is_hit: bool = False
     is_no_diff: bool = True
     is_ambiguous: bool = False
+    is_rejected: bool = False  # 400-class response indicates server rejection
     confidence: float = 0.0  # 0.0 - 1.0
     evidence: list[str] = field(default_factory=list)
     delta: Optional[ResponseDelta] = None
@@ -34,6 +35,7 @@ class TriageResult:
             "is_hit": str(self.is_hit),
             "is_no_diff": str(self.is_no_diff),
             "is_ambiguous": str(self.is_ambiguous),
+            "is_rejected": str(self.is_rejected),
             "confidence": f"{self.confidence:.2f}",
             "evidence": "; ".join(self.evidence),
         }
@@ -71,6 +73,15 @@ def triage(
 
     result = TriageResult(delta=delta)
     result.is_no_diff = delta.is_no_diff
+
+    # Check for rejected responses (400-class status codes)
+    if 400 <= status_code < 500 and status_code != 401 and status_code != 403:
+        # 400, 404, 405, etc. indicate server rejected the payload
+        # (but exclude 401/403 which are auth issues)
+        result.is_rejected = True
+        result.confidence = 0.90
+        result.evidence.append(f"rejected: {status_code}")
+        return result
 
     if delta.is_no_diff:
         result.confidence = 1.0

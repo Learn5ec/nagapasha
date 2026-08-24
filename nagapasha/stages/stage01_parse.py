@@ -20,6 +20,9 @@ from nagapasha.models.request_model import ParameterModel, RequestModel
 # ---------------------------------------------------------------------------
 
 _TYPE_PATTERNS: list[tuple[str, re.Pattern]] = [
+    # JWT: three base64url segments separated by dots (header.payload.signature)
+    # Each segment must be at least 5 chars of base64url characters
+    ("jwt", re.compile(r"^[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}$")),
     ("uuid", re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")),
     ("email", re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")),
     ("filename", re.compile(r"\.(jpg|jpeg|png|gif|pdf|txt|doc|docx|zip|tar|gz|csv|json|xml|html?)$", re.I)),

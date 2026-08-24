@@ -48,6 +48,7 @@ class PayloadCandidate:
         destructive: True if this payload could cause data loss or system damage
         probe_variant: Optional constrained probe variant (e.g., sleep(5) before RCE)
         identity_hash: Stable hash for dedup and idempotent resume
+        raw_body: True if payload should be sent as raw body (bypassing JSON parsing)
     """
 
     parameter: ParameterModel
@@ -58,6 +59,7 @@ class PayloadCandidate:
     destructive: bool = False
     probe_variant: Optional["PayloadCandidate"] = None
     identity_hash: str = ""  # SHA256 of (param.name, param.location, attack_class, payload)
+    raw_body: bool = False  # If True, send payload directly as body for JSON-break attacks
 
     def __post_init__(self) -> None:
         """Auto-compute identity_hash if not provided."""
@@ -198,6 +200,7 @@ class PayloadLoop:
         engagement_context: Optional[EngagementContext] = None,
         allow_destructive: bool = False,
         host_allowlist: Optional[list[str]] = None,
+        restore_after: bool = False,
     ) -> None:
         self.request_model = request_model
         self.baseline = baseline_fingerprint
@@ -261,6 +264,11 @@ class PayloadLoop:
 
         # Stage 88: Dedup & idempotent resume
         self._fired_identities: set[str] = set()
+
+        # State-mutation restore
+        self.restore_after = restore_after
+        self._original_body: Optional[str] = None
+        self._original_method: str = request_model.method.upper()
 
     def kill(self) -> None:
         """Signal the loop to stop as soon as it can."""
@@ -365,6 +373,10 @@ class PayloadLoop:
             Summary dict with stats and results.
         """
         self._start_time = time.monotonic()
+
+        # Capture original body for state-mutation restore
+        if self.restore_after:
+            self._original_body = self.request_model.body or ""
 
         # Process payloads in batches
         i = 0
@@ -520,6 +532,14 @@ class PayloadLoop:
 
             i = batch_end
 
+        # Restore original state for non-idempotent methods
+        if self.restore_after and self._should_restore():
+            logger.info("Restoring original value for state-mutating method...")
+            try:
+                await self._restore_original()
+            except Exception as e:
+                logger.warning(f"Failed to restore original value: {e}")
+
         # Summary
         elapsed = time.monotonic() - self._start_time
         return {
@@ -551,6 +571,52 @@ class PayloadLoop:
             "body_hash": baseline.body_hash,
             "avg_response_time": baseline.avg_response_time,
         }
+
+    def _should_restore(self) -> bool:
+        """Check if we should restore the original value.
+
+        State-mutating methods: PATCH, PUT, POST, DELETE
+        Idempotent methods: GET, HEAD, OPTIONS (no restore needed)
+
+        Returns:
+            True if restore should be performed
+        """
+        return self._original_method in ("PATCH", "PUT", "POST", "DELETE")
+
+    async def _restore_original(self) -> None:
+        """Restore the original request body/value.
+
+        Re-sends the original request with the original body to undo any mutations
+        caused by the payload loop.
+        """
+        if self._original_body is None:
+            return
+
+        # Capture original body before any modifications
+        original_req = RequestModel(
+            url=self.request_model.url,
+            method=self._original_method,
+            headers=dict(self.request_model.headers),
+            body=self._original_body,
+            parameters=list(self.request_model.parameters),
+        )
+
+        # Fire a single restore request
+        restore_result = await self._fire_single(PayloadCandidate(
+            parameter=self.request_model.parameters[0] if self.request_model.parameters else ParameterModel(
+                name="_restore",
+                location="body",
+                inferred_type="free_text",
+                raw_value=self._original_body,
+            ),
+            payload=self._original_body,
+            attack_class="restore",
+        ))
+
+        logger.info(
+            f"Restore complete: status={restore_result.status_code}, "
+            f"method={self._original_method}"
+        )
 
     async def _fire_single(
         self, candidate: PayloadCandidate
@@ -654,15 +720,19 @@ class PayloadLoop:
             modified.query_params[param.name] = payload
 
         elif param.location == "body_json":
-            # Inject into JSON body
-            import json as _json
-            try:
-                body = _json.loads(modified.body or "{}")
-                body[param.name] = payload
-                modified.body = _json.dumps(body)
-            except (ValueError, TypeError):
-                # Fall through — keep original body
-                pass
+            if candidate.raw_body:
+                # Raw envelope: send payload directly as body (bypass JSON parsing)
+                modified.body = payload
+            else:
+                # Inject into JSON body
+                import json as _json
+                try:
+                    body = _json.loads(modified.body or "{}")
+                    body[param.name] = payload
+                    modified.body = _json.dumps(body)
+                except (ValueError, TypeError):
+                    # Fall through — keep original body
+                    pass
 
         elif param.location == "body_form":
             # Inject into form body (key=value)

