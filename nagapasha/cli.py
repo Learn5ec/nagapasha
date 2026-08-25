@@ -96,6 +96,11 @@ def cicd(
     engagement: Optional[str] = typer.Option(
         None, "--engagement", "-e", help="Path to .ctx engagement file"
     ),
+    tech_stack_json: Optional[str] = typer.Option(
+        None, "--tech-stack", "-t",
+        help="JSON string with tech-stack overrides: "
+             '{"server": "nginx", "database": "postgresql", "framework": "flask"}'
+    ),
     no_authorization_required: bool = typer.Option(
         False, "--no-authorization-required",
         help="Explicitly disable security gates (not recommended for live targets)",
@@ -124,6 +129,27 @@ def cicd(
     except CurlParseError as e:
         console.print(f"[red]Parse error:[/red] {e}")
         sys.exit(1)
+
+    # A6: Parse --tech-stack JSON and populate tech_stack_context
+    if tech_stack_json:
+        try:
+            import json as _json
+            tech_stack_dict = _json.loads(tech_stack_json)
+            req.tech_stack_context = TechStackContext(
+                server=tech_stack_dict.get("server"),
+                server_version=tech_stack_dict.get("server_version"),
+                backend_language=tech_stack_dict.get("backend_language"),
+                framework=tech_stack_dict.get("framework"),
+                database=tech_stack_dict.get("database"),
+                frontend=tech_stack_dict.get("frontend"),
+                source="user_supplied",
+            )
+            if req.tech_stack_context.database:
+                req.dialect_hint = req.tech_stack_context.database
+            console.print(f"[dim]Tech-stack override: {tech_stack_dict}[/dim]")
+        except Exception as e:
+            console.print(f"[red]Failed to parse --tech-stack JSON:[/red] {e}")
+            sys.exit(3)
 
     # Authorization gate: fail if firing requests without engagement context
     _check_authorization(engagement_context, dry_run=False, firing_requests=True,
@@ -787,6 +813,11 @@ def full(
     engagement: Optional[str] = typer.Option(
         None, "--engagement", "-e", help="Path to .ctx engagement file"
     ),
+    tech_stack_json: Optional[str] = typer.Option(
+        None, "--tech-stack", "-t",
+        help="JSON string with tech-stack overrides: "
+             '{"server": "nginx", "database": "postgresql", "framework": "flask"}'
+    ),
     no_authorization_required: bool = typer.Option(
         False, "--no-authorization-required",
         help="Explicitly disable security gates (not recommended for live targets)",
@@ -818,6 +849,28 @@ def full(
     except CurlParseError as e:
         console.print(f"[red]Parse error:[/red] {e}")
         sys.exit(1)
+
+    # A6: Parse --tech-stack JSON and populate tech_stack_context
+    if tech_stack_json:
+        try:
+            import json as _json
+            tech_stack_dict = _json.loads(tech_stack_json)
+            req.tech_stack_context = TechStackContext(
+                server=tech_stack_dict.get("server"),
+                server_version=tech_stack_dict.get("server_version"),
+                backend_language=tech_stack_dict.get("backend_language"),
+                framework=tech_stack_dict.get("framework"),
+                database=tech_stack_dict.get("database"),
+                frontend=tech_stack_dict.get("frontend"),
+                source="user_supplied",
+            )
+            # Set dialect_hint from database field
+            if req.tech_stack_context.database:
+                req.dialect_hint = req.tech_stack_context.database
+            console.print(f"[dim]Tech-stack override: {tech_stack_dict}[/dim]")
+        except Exception as e:
+            console.print(f"[red]Failed to parse --tech-stack JSON:[/red] {e}")
+            sys.exit(3)
 
     # Authorization gate: fail if firing requests without engagement context
     _check_authorization(engagement_context, dry_run, firing_requests=not dry_run,

@@ -47,6 +47,36 @@ class ParameterModel:
 
 
 # ---------------------------------------------------------------------------
+# TechStackContext (A6: manual override + dialect-aware selection)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TechStackContext:
+    """Manual tech-stack override for dialect-aware payload selection.
+
+    User-supplied values take precedence over recon auto-detection.
+    Disagreements between user input and recon are logged and surfaced in reports.
+
+    Attributes:
+        server: Web server (e.g. "nginx", "apache", "iis")
+        server_version: Server version string
+        backend_language: Runtime language (e.g. "python", "java", "nodejs")
+        framework: Framework (e.g. "flask", "django", "express", "spring")
+        database: Database engine — feeds dialect_hint (e.g. "postgresql", "mysql", "mssql")
+        frontend: Frontend framework (e.g. "react", "angular", "vue") — informational
+        source: "user_supplied" or "auto_detected" from recon
+    """
+
+    server: Optional[str] = None
+    server_version: Optional[str] = None
+    backend_language: Optional[str] = None
+    framework: Optional[str] = None
+    database: Optional[str] = None          # feeds dialect_hint
+    frontend: Optional[str] = None          # informational
+    source: str = "user_supplied"           # vs "auto_detected" from recon
+
+
+# ---------------------------------------------------------------------------
 # Request (the growing spine)
 # ---------------------------------------------------------------------------
 
@@ -78,6 +108,7 @@ class RequestModel:
     # ---- Stage 4 outputs --------------------------------------------------
     confirmed_tech_stack: Optional[dict[str, Any]] = None
     dialect_hint: Optional[str] = None   # explicit dialect override (e.g. "postgres", "mysql")
+    tech_stack_context: Optional[TechStackContext] = None  # A6: manual override
 
     # ---- Stage 5-8 outputs (attack specs per-parameter) ------------------
     attack_specs: list[dict[str, Any]] = field(default_factory=list)
