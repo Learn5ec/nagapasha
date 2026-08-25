@@ -95,11 +95,13 @@ class ResponseDelta:
     response_time_delta: float = 0.0    # seconds
     has_reflected_payload: bool = False
     reflected_text: str = ""
+    reflection_context: str = "not_reflected"  # "unescaped" | "html_escaped" | "not_reflected"
     has_error_signature: bool = False
     error_signature: str = ""
     is_confirmed_hit: bool = False
     is_near_miss: bool = False
     has_new_auth_artifact: bool = False  # new Set-Cookie or session field in response
+    has_file_disclosure: bool = False    # A4: positive file content detected
     delta_details: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -110,12 +112,65 @@ class ResponseDelta:
             "response_time_delta": self.response_time_delta,
             "has_reflected_payload": self.has_reflected_payload,
             "reflected_text": self.reflected_text[:100],
+            "reflection_context": self.reflection_context,
             "has_error_signature": self.has_error_signature,
             "is_confirmed_hit": self.is_confirmed_hit,
             "is_near_miss": self.is_near_miss,
             "has_new_auth_artifact": self.has_new_auth_artifact,
+            "has_file_disclosure": self.has_file_disclosure,
             "delta_details": self.delta_details,
         }
+
+
+def _classify_reflection(payload: str, body: str) -> str:
+    """Classify how a payload is reflected in the response body.
+
+    Returns:
+        "unescaped" — payload appears literally in body (XSS/injection confirmed)
+        "html_escaped" — payload appears HTML-entity-encoded (not exploitable)
+        "not_reflected" — payload not found in body
+    """
+    if not payload or not body:
+        return "not_reflected"
+
+    if payload in body:
+        return "unescaped"
+
+    # Check if payload was safely HTML-entity-encoded
+    # Handle both named and numeric character references
+    # Named: &amp; &lt; &gt; &quot; &#39;
+    # Numeric: &#34; (for "), &#39; (for '), &#60; (for <), &#62; (for >), &#38; (for &)
+    escaped_variants = [
+        # Standard named entities
+        (
+            payload.replace("&", "&amp;")
+                   .replace("<", "&lt;")
+                   .replace(">", "&gt;")
+                   .replace('"', "&quot;")
+                   .replace("'", "&#39;")
+        ),
+        # Numeric character references (alternative encoding)
+        (
+            payload.replace("&", "&#38;")
+                   .replace("<", "&#60;")
+                   .replace(">", "&#62;")
+                   .replace('"', "&#34;")
+                   .replace("'", "&#39;")
+        ),
+        # Mixed: some named, some numeric
+        (
+            payload.replace("&", "&amp;")
+                   .replace("<", "&lt;")
+                   .replace(">", "&gt;")
+                   .replace('"', "&#34;")
+                   .replace("'", "&#39;")
+        ),
+    ]
+    for escaped in escaped_variants:
+        if escaped in body:
+            return "html_escaped"
+
+    return "not_reflected"
 
 
 def compute_delta(
@@ -178,22 +233,49 @@ def compute_delta(
     if new_hash != baseline.body_hash:
         delta.is_no_diff = False
 
-    # Reflected payload detection
+    # Reflected payload detection — A2a: context-aware classification
     if payload and body:
-        # Check raw and lightly-encoded forms
+        # Check raw and lightly-encoded forms first
         import urllib.parse
         url_encoded = urllib.parse.quote(payload, safe="")
         check_strings = [payload, url_encoded, payload.lower()]
         body_lower = body.lower()
+        found_reflection = False
         for check in check_strings:
             if check and check.lower() in body_lower:
                 delta.has_reflected_payload = True
                 delta.reflected_text = check[:80]
                 delta.is_no_diff = False
-                delta.delta_details.append(
-                    f"reflected: payload visible in response"
-                )
+                # Classify the reflection context
+                reflection_ctx = _classify_reflection(check, body)
+                delta.reflection_context = reflection_ctx
+                if reflection_ctx == "unescaped":
+                    delta.delta_details.append(
+                        f"reflected: payload visible unescaped in response"
+                    )
+                elif reflection_ctx == "html_escaped":
+                    delta.delta_details.append(
+                        f"reflected: payload HTML-escaped in response"
+                    )
+                else:
+                    delta.delta_details.append(
+                        f"reflected: payload visible in response"
+                    )
+                found_reflection = True
                 break
+
+        # Fallback: check for HTML-escaped reflection if raw/URL forms didn't match
+        if not found_reflection:
+            reflection_ctx = _classify_reflection(payload, body)
+            if reflection_ctx == "html_escaped":
+                delta.has_reflected_payload = True
+                delta.reflected_text = payload[:80]
+                delta.is_no_diff = False
+                delta.reflection_context = "html_escaped"
+                delta.delta_details.append(
+                    f"reflected: payload HTML-escaped in response"
+                )
+                found_reflection = True
 
     # Error signature detection
     for sig in ERROR_SIGNATURES:
@@ -255,8 +337,11 @@ def compute_delta(
     if delta.is_no_diff:
         return delta
 
-    # Confirmed hit: error signature or payload reflection
-    if delta.has_error_signature or delta.has_reflected_payload:
+    # Confirmed hit: error signature or unescaped payload reflection
+    # HTML-escaped reflection is NOT a confirmed hit (payload is safely encoded)
+    if delta.has_error_signature:
+        delta.is_confirmed_hit = True
+    elif delta.has_reflected_payload and delta.reflection_context == "unescaped":
         delta.is_confirmed_hit = True
 
     # Near-miss: status code changed but no error/reflection

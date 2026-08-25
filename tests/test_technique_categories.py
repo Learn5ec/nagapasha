@@ -1,10 +1,11 @@
 """Tests for nagapasha/utils/technique_categories.py
 
 Verifies:
-- All expected categories exist
+- All expected categories exist (including A2 XSS and A3 HTML-injection)
 - time_based_blind contains Postgres-specific pg_sleep variants (A1 fix)
 - Tuples carry dialect tags
 - AUTH_PRIORITY_CATEGORIES covers auth-endpoint credential fields
+- XSS and HTML-injection categories have proper sub-context structure
 """
 
 import pytest
@@ -85,3 +86,64 @@ class TestTechniqueCategoriesStructure:
         for cat in AUTH_PRIORITY_CATEGORIES:
             assert cat in TECHNIQUE_CATEGORIES, \
                 f"AUTH_PRIORITY_CATEGORIES references unknown category: {cat}"
+
+
+# ---------------------------------------------------------------------------
+# A2: XSS reflected category
+# ---------------------------------------------------------------------------
+
+class TestXSSReflectedCategory:
+    """A2: Verify XSS technique category structure and payload diversity."""
+
+    def test_xss_reflected_category_exists(self):
+        """A2: xss_reflected must be in TECHNIQUE_CATEGORIES."""
+        assert "xss_reflected" in TECHNIQUE_CATEGORIES
+
+    def test_xss_reflected_has_html_context_variants(self):
+        """A2: html_context must contain script, img, svg, body variants."""
+        variants = TECHNIQUE_CATEGORIES["xss_reflected"]["variants"]["html_context"]
+        assert any("<script>" in v for v in variants)
+        assert any("onerror" in v for v in variants)
+        assert any("onload" in v for v in variants)
+
+    def test_xss_reflected_has_attribute_breakout(self):
+        """A2: attribute_breakout must contain quote-breakout payloads."""
+        variants = TECHNIQUE_CATEGORIES["xss_reflected"]["variants"]["attribute_breakout"]
+        assert any("<script>" in v for v in variants)
+        assert any("onmouseover" in v or "onfocus" in v for v in variants)
+
+    def test_xss_reflected_has_javascript_uri(self):
+        """A2: javascript_uri must contain javascript: payloads."""
+        variants = TECHNIQUE_CATEGORIES["xss_reflected"]["variants"]["javascript_uri"]
+        assert all("javascript:" in v for v in variants)
+
+    def test_xss_reflected_has_encoded_variants(self):
+        """A2: encoded must contain URL-encoded and unicode-escaped payloads."""
+        variants = TECHNIQUE_CATEGORIES["xss_reflected"]["variants"]["encoded"]
+        assert any("%3Cscript%" in v for v in variants)
+        assert any("\\u003c" in v for v in variants)
+
+    def test_xss_reflected_has_polyglot(self):
+        """A2: polyglot must contain at least one polyglot payload."""
+        variants = TECHNIQUE_CATEGORIES["xss_reflected"]["variants"]["polyglot"]
+        assert len(variants) >= 1
+
+
+# ---------------------------------------------------------------------------
+# A3: HTML injection category
+# ---------------------------------------------------------------------------
+
+class TestHtmlInjectionCategory:
+    """A3: Verify HTML injection technique category structure."""
+
+    def test_html_injection_category_exists(self):
+        """A3: html_injection must be in TECHNIQUE_CATEGORIES."""
+        assert "html_injection" in TECHNIQUE_CATEGORIES
+
+    def test_html_injection_has_structural_variants(self):
+        """A3: structural must contain diverse HTML elements."""
+        variants = TECHNIQUE_CATEGORIES["html_injection"]["variants"]["structural"]
+        assert any("<h1>" in v for v in variants)
+        assert any("<img" in v for v in variants)
+        assert any("<hr>" in v for v in variants)
+        assert any("<iframe" in v for v in variants)
