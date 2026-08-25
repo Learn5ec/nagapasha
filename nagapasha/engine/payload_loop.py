@@ -30,6 +30,10 @@ from nagapasha.scope import ScopeError
 import logging
 logger = logging.getLogger(__name__)
 
+# A5: HTTP methods that are irreversible — once a resource is deleted, it cannot
+# be restored from what we captured. Requires explicit --allow-irreversible-delete
+IRREVERSIBLE_METHODS = frozenset({"DELETE"})
+
 
 # ---------------------------------------------------------------------------
 # Data types
@@ -49,6 +53,8 @@ class PayloadCandidate:
         probe_variant: Optional constrained probe variant (e.g., sleep(5) before RCE)
         identity_hash: Stable hash for dedup and idempotent resume
         raw_body: True if payload should be sent as raw body (bypassing JSON parsing)
+        restorable: True if the resource can be restored after mutation (default False for DELETE)
+        destructive_reason: Human-readable reason for destructive flag (e.g., "method=DELETE")
     """
 
     parameter: ParameterModel
@@ -60,6 +66,8 @@ class PayloadCandidate:
     probe_variant: Optional["PayloadCandidate"] = None
     identity_hash: str = ""  # SHA256 of (param.name, param.location, attack_class, payload)
     raw_body: bool = False  # If True, send payload directly as body for JSON-break attacks
+    restorable: bool = True  # False for DELETE methods (A5)
+    destructive_reason: str = ""  # Why destructive flag is set
 
     def __post_init__(self) -> None:
         """Auto-compute identity_hash if not provided."""
@@ -206,6 +214,7 @@ class PayloadLoop:
         jwt_deadline: Optional[float] = None,
         engagement_context: Optional[EngagementContext] = None,
         allow_destructive: bool = False,
+        allow_irreversible_delete: bool = False,  # A5: explicit opt-in for DELETE methods
         host_allowlist: Optional[list[str]] = None,
         restore_after: bool = False,
     ) -> None:
@@ -243,6 +252,15 @@ class PayloadLoop:
         # Stage 8.5: Destructive payload gate
         self.allow_destructive = allow_destructive
 
+        # A5: Irreversible delete gate
+        self.allow_irreversible_delete = allow_irreversible_delete
+        self._method_is_irreversible = request_model.method.upper() in IRREVERSIBLE_METHODS
+        if self._method_is_irreversible and not allow_irreversible_delete:
+            logger.warning(
+                f"DELETE method detected but allow_irreversible_delete=False — "
+                f"all payloads will be blocked. Pass --allow-irreversible-delete to opt in."
+            )
+
         # Kill switch
         self._kill: asyncio.Event = asyncio.Event()
         self._kill.clear()
@@ -274,6 +292,16 @@ class PayloadLoop:
 
         # State-mutation restore
         self.restore_after = restore_after
+
+        # A5: Mark DELETE method candidates as non-restorable and destructive
+        if self._method_is_irreversible:
+            for candidate in self.payloads:
+                if not candidate.destructive:
+                    candidate.destructive = True
+                    candidate.destructive_reason = (
+                        f"method={self.request_model.method} is irreversible"
+                    )
+                candidate.restorable = False
         self._original_body: Optional[str] = None
         self._original_method: str = request_model.method.upper()
 
@@ -655,18 +683,40 @@ class PayloadLoop:
             )
 
         # Stage 8.5: Destructive payload gate
+        # A5: Irreversible delete gate takes precedence — if allow_irreversible_delete=True,
+        # the DELETE method gate allows firing regardless of allow_destructive
         if candidate.destructive and not self.allow_destructive:
-            logger.warning(
-                f"Refusing to fire destructive payload: {candidate.attack_class} "
-                f"on {candidate.parameter.name} — pass allow_destructive=True to enable"
-            )
-            return PayloadResult(
-                candidate=candidate,
-                status_code=0,
-                delta=None,
-                elapsed=0.0,
-                hit=False,
-            )
+            if not (self._method_is_irreversible and self.allow_irreversible_delete):
+                logger.warning(
+                    f"Refusing to fire destructive payload: {candidate.attack_class} "
+                    f"on {candidate.parameter.name} — pass allow_destructive=True to enable"
+                )
+                return PayloadResult(
+                    candidate=candidate,
+                    status_code=0,
+                    delta=None,
+                    elapsed=0.0,
+                    hit=False,
+                )
+
+        # A5: Irreversible delete gate — DELETE method is always destructive
+        # regardless of payload class, because the resource cannot be restored
+        if self._method_is_irreversible:
+            if not candidate.restorable:
+                if not self.allow_irreversible_delete:
+                    logger.warning(
+                        f"Refusing to fire payload on DELETE endpoint: {candidate.attack_class} "
+                        f"on {candidate.parameter.name} — not restorable. "
+                        f"Pass allow_irreversible_delete=True to opt in."
+                    )
+                    return PayloadResult(
+                        candidate=candidate,
+                        status_code=0,
+                        delta=None,
+                        elapsed=0.0,
+                        hit=False,
+                    )
+                # allow_irreversible_delete=True → allow firing
 
         # Stage 2.5: Exfiltration prevention
         if self.host_allowlist is not None:
