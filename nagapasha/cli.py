@@ -139,6 +139,15 @@ def cicd(
     # Targeting (auto)
     req = run_targeting(req, auto=True)
 
+    # Auth-endpoint detection (sets priority for technique-category selection)
+    try:
+        from nagapasha.utils.auth_detect import detect_auth_endpoint
+        req.is_auth_endpoint = detect_auth_endpoint(req)
+        if req.is_auth_endpoint:
+            console.print("[yellow]Auth endpoint detected — prioritizing auth-bypass techniques[/yellow]")
+    except Exception as e:
+        logger.warning(f"Auth endpoint detection failed: {e}")
+
     # Strategist (field-name-aware attack class selection)
     if req.confirmed_tech_stack or recon_result.waf_detected:
         try:
@@ -242,6 +251,14 @@ def cicd(
     console.print(f"  Hits: {results['hits']}")
     console.print(f"  Near-misses: {results['near_misses']}")
     console.print(f"  Reports saved to: {output_dir}")
+
+    # Softening for auth endpoints: 0 hits doesn't prove security
+    if req.is_auth_endpoint and results['hits'] == 0 and results['near_misses'] == 0:
+        console.print(
+            f"  [yellow]Note: {req.url} is an authentication endpoint. "
+            f"0 hits across {results['total_fired']} payloads. "
+            f"This does not prove absence of vulnerabilities.[/yellow]"
+        )
 
     # Check severity threshold based on --fail-on-severity
     SEVERITY_THRESHOLDS = {
@@ -689,6 +706,10 @@ def _check_authorization(
 def _on_result(result) -> None:
     """Print each payload result for the run/full commands."""
     classification = result.classification
+    if classification == "INTERNAL-ERROR":
+        console.print(f"  [bold red]ERROR[/bold red] [{result.candidate.parameter.name}] "
+                      f"{classification} | {result.error[:80] if result.error else 'unknown'}")
+        return
     if classification == "HIT":
         console.print(f"  [bold green]HIT[/bold green] [{result.candidate.parameter.name}] "
                       f"{classification} | status={result.status_code} | "
@@ -838,6 +859,15 @@ def full(
     # Targeting (auto-select for full pipeline)
     req = run_targeting(req, auto=True)
 
+    # Auth-endpoint detection (sets priority for technique-category selection)
+    try:
+        from nagapasha.utils.auth_detect import detect_auth_endpoint
+        req.is_auth_endpoint = detect_auth_endpoint(req)
+        if req.is_auth_endpoint:
+            console.print("[yellow]Auth endpoint detected — prioritizing auth-bypass techniques[/yellow]")
+    except Exception as e:
+        logger.warning(f"Auth endpoint detection failed: {e}")
+
     # Strategist (field-name-aware attack class selection)
     if req.confirmed_tech_stack or recon_result.waf_detected:
         try:
@@ -932,6 +962,14 @@ def full(
     console.print(f"  No-diff:       {results['no_diff']}")
     console.print(f"  Elapsed:       {results['elapsed_seconds']}s")
     console.print(f"  Throughput:    {results['requests_per_second']} req/s")
+
+    # Softening for auth endpoints: 0 hits doesn't prove security
+    if req.is_auth_endpoint and results['hits'] == 0 and results['near_misses'] == 0:
+        console.print(
+            f"  [yellow]Note: {req.url} is an authentication endpoint. "
+            f"0 hits across {results['total_fired']} payloads in multiple "
+            f"technique categories. This does not prove absence of vulnerabilities.[/yellow]"
+        )
 
     # Save engagement
     with EngagementStore() as store:
@@ -1028,21 +1066,17 @@ async def _build_payload_candidates(
     for param in sorted(req.parameters, key=_location_sort_key):
         if not param.is_fuzz_target:
             continue
-        default_payloads = _default_payloads_for_type(param.inferred_type)
-        for payload in default_payloads:
-            fitted = _fit_payload_for_param(
-                param=param,
-                attack_class=f"default/{param.inferred_type}",
-                payload=payload,
-                tech_stack=req.confirmed_tech_stack,
-                waf_detected=recon_result.waf_detected if recon_result else False,
-                waf_name=recon_result.waf_name if recon_result else None,
-            )
-            candidates.append(PayloadCandidate(
-                parameter=param,
-                payload=fitted,
-                attack_class=f"default/{param.inferred_type}",
-            ))
+
+        # Use technique-category-based payloads instead of hardcoded defaults
+        tech_payloads = _build_technique_category_payloads(
+            param=param,
+            req=req,
+            tech_stack=req.confirmed_tech_stack,
+            waf_detected=recon_result.waf_detected if recon_result else False,
+            waf_name=recon_result.waf_name if recon_result else None,
+        )
+        for tc_payload in tech_payloads:
+            candidates.append(tc_payload)
 
         # Add raw JSON envelope payloads for body_json parameters
         if param.location == "body_json":
@@ -1140,6 +1174,119 @@ async def _build_payload_candidates(
                     payload=payload,
                     attack_class=f"default/{param.inferred_type}",
                 ))
+
+    return candidates
+
+
+def _build_technique_category_payloads(
+    param: ParameterModel,
+    req: RequestModel,
+    tech_stack: Optional[dict[str, Any]] = None,
+    waf_detected: bool = False,
+    waf_name: Optional[str] = None,
+) -> list[PayloadCandidate]:
+    """Build PayloadCandidates from technique categories in the KB.
+
+    Uses technique_categories.py to select relevant categories based on the
+    parameter's location and the request's auth-endpoint status. Auth-endpoint
+    detection raises priority for tautology and boolean_differential categories
+    targeting credential fields. Dialect variants are selected based on
+    tech-stack fingerprinting when available.
+    """
+    candidates: list[PayloadCandidate] = []
+    from nagapasha.utils.technique_categories import (
+        TECHNIQUE_CATEGORIES,
+        CATEGORY_TARGET_LOCATIONS,
+        AUTH_PRIORITY_CATEGORIES,
+    )
+
+    # Determine which categories to use
+    selected_categories: list[str] = []
+
+    # For body_json and query params, all technique categories are relevant
+    if param.location in ("body_json", "query", "body_form", "header"):
+        # If auth-endpoint and param is a credential field, prioritize those categories
+        if req.is_auth_endpoint and param.name.lower() in ("email", "e-mail", "username", "user", "login"):
+            selected_categories = list(AUTH_PRIORITY_CATEGORIES)
+        else:
+            selected_categories = list(TECHNIQUE_CATEGORIES.keys())
+
+    # Select dialect variants based on tech stack
+    tech = tech_stack or {}
+    framework = tech.get("framework", "").lower()
+    language = tech.get("language", "").lower()
+
+    # Determine which dialects to use
+    dialects: list[str] = ["sql"]  # default
+    if "express" in framework or "node" in framework:
+        dialects.append("nosql")
+    if "django" in language or "flask" in language:
+        dialects.append("nosql")
+
+    # For each selected category, generate payloads
+    for category_name in selected_categories:
+        category = TECHNIQUE_CATEGORIES.get(category_name, {})
+        variants = category.get("variants", {})
+
+        for dialect in dialects:
+            dialect_variants = variants.get(dialect)
+            if not dialect_variants:
+                continue
+
+            if isinstance(dialect_variants, dict):
+                # Boolean-differential: generate both true and false variants
+                true_payloads = dialect_variants.get("true", [])
+                false_payloads = dialect_variants.get("false", [])
+                for tp in true_payloads:
+                    fitted = _fit_payload_for_param(
+                        param=param,
+                        attack_class=category_name,
+                        payload=tp,
+                        tech_stack=tech_stack,
+                        waf_detected=waf_detected,
+                        waf_name=waf_name,
+                    )
+                    candidates.append(PayloadCandidate(
+                        parameter=param,
+                        payload=fitted,
+                        attack_class=category_name,
+                        payload_tags=[category_name, dialect, "true_condition"],
+                        rationale=f"True-condition {category_name} payload ({dialect})",
+                    ))
+                for fp in false_payloads:
+                    fitted = _fit_payload_for_param(
+                        param=param,
+                        attack_class=category_name,
+                        payload=fp,
+                        tech_stack=tech_stack,
+                        waf_detected=waf_detected,
+                        waf_name=waf_name,
+                    )
+                    candidates.append(PayloadCandidate(
+                        parameter=param,
+                        payload=fitted,
+                        attack_class=category_name,
+                        payload_tags=[category_name, dialect, "false_condition"],
+                        rationale=f"False-condition {category_name} payload ({dialect})",
+                    ))
+            else:
+                # List of payloads
+                for payload in dialect_variants:
+                    fitted = _fit_payload_for_param(
+                        param=param,
+                        attack_class=category_name,
+                        payload=payload,
+                        tech_stack=tech_stack,
+                        waf_detected=waf_detected,
+                        waf_name=waf_name,
+                    )
+                    candidates.append(PayloadCandidate(
+                        parameter=param,
+                        payload=fitted,
+                        attack_class=category_name,
+                        payload_tags=[category_name, dialect],
+                        rationale=f"{category_name} payload ({dialect})",
+                    ))
 
     return candidates
 

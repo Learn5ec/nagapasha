@@ -16,18 +16,31 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 
-# Known error-signature regexes (SQL errors, stack traces, path disclosure)
+# Known error-signature regexes (SQL, NoSQL, template engines, shell)
 ERROR_SIGNATURES = [
+    # SQL errors
     re.compile(r"(?i)sql\s*(syntax|error|exception|injection)", re.DOTALL),
     re.compile(r"(?i)mysql_fetch|mysql_num_rows|mysql_query", re.DOTALL),
     re.compile(r"(?i)pg_\w+\(\):.*?\[", re.DOTALL),
     re.compile(r"(?i)unclosed\s*quotation\s*mark", re.DOTALL),
     re.compile(r"(?i)ORA-\d{5}", re.DOTALL),
     re.compile(r"(?i)database\s*(error|exception|connection)", re.DOTALL),
+    # NoSQL driver errors
+    re.compile(r"(?i)PymongoError|MongoServerError|DriverError", re.DOTALL),
+    re.compile(r"(?i)MongoDB\s*(error|exception|invalid)", re.DOTALL),
+    re.compile(r"(?i)RedisError|ConnectionResetError.*redis", re.DOTALL),
+    # Template engine errors
+    re.compile(r"(?i)TemplateSyntaxError|TemplateAssertionError|TemplateNotFound", re.DOTALL),
+    re.compile(r"(?i)jinja2\.Environment", re.DOTALL),
+    # Stack traces / generic errors
     re.compile(r"(?i)stack\s*trace", re.DOTALL),
     re.compile(r"(?i)Traceback\s*\(", re.DOTALL),
     re.compile(r"(?i)Fatal\s*error", re.DOTALL),
     re.compile(r"(?i)class\s+\w+Exception", re.DOTALL),
+    # Shell/command injection indicators
+    re.compile(r"(?i)\b(sh|bash)\b.*?\b(error|cannot|no\s*such)", re.DOTALL),
+    re.compile(r"(?i)/bin/\w+\b.*?\b(error|not\s*found)", re.DOTALL),
+    # File/system errors
     re.compile(r"(?i)permission\s*denied.*?(read|write|access)", re.DOTALL),
     re.compile(r"(?i)file\s*(does\s*not\s*exist|not\s*found|missing)", re.DOTALL),
     re.compile(r"(?i)include_path.*?\[", re.DOTALL),
@@ -86,6 +99,7 @@ class ResponseDelta:
     error_signature: str = ""
     is_confirmed_hit: bool = False
     is_near_miss: bool = False
+    has_new_auth_artifact: bool = False  # new Set-Cookie or session field in response
     delta_details: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -99,6 +113,7 @@ class ResponseDelta:
             "has_error_signature": self.has_error_signature,
             "is_confirmed_hit": self.is_confirmed_hit,
             "is_near_miss": self.is_near_miss,
+            "has_new_auth_artifact": self.has_new_auth_artifact,
             "delta_details": self.delta_details,
         }
 
@@ -190,6 +205,51 @@ def compute_delta(
                 delta.error_signature = sig.pattern[:80]
             delta.delta_details.append(f"error-signature matched: {sig.pattern[:60]}")
             break
+
+    # Auth artifact detection: new session token / cookie / session field
+    # catching the *effect* of a successful bypass, not the cause
+    baseline_had_set_cookie = "set-cookie" in baseline.header_names
+    now_has_set_cookie = any(k.lower() == "set-cookie" for k in headers)
+    if now_has_set_cookie and not baseline_had_set_cookie:
+        delta.has_new_auth_artifact = True
+        delta.is_no_diff = False
+        delta.delta_details.append("new Set-Cookie header in response")
+
+    # JWT-shaped token: three base64url segments separated by dots
+    if not delta.has_new_auth_artifact and body:
+        if re.search(r"\b[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b", body):
+            delta.has_new_auth_artifact = True
+            delta.is_no_diff = False
+            delta.delta_details.append("JWT-shaped token in response body")
+
+    # Generic session field names in JSON response
+    if not delta.has_new_auth_artifact and body:
+        import json as _json
+        try:
+            data = _json.loads(body)
+            if isinstance(data, dict):
+                session_keys = {"token", "access_token", "session_id", "api_key",
+                                "refresh_token", "id_token"}
+                for key in data:
+                    if key.lower() in session_keys:
+                        delta.has_new_auth_artifact = True
+                        delta.is_no_diff = False
+                        delta.delta_details.append(
+                            f"session field detected: {key}"
+                        )
+                        break
+        except (ValueError, TypeError):
+            pass
+
+    # Auth-flip detection: baseline was 401/403, response is now 2xx
+    # This is a high-confidence bypass signal regardless of body content
+    if delta.status_delta is not None and delta.status_delta < 0:
+        if baseline.status_code in (401, 403) and 200 <= status_code < 300:
+            delta.is_confirmed_hit = True
+            delta.is_no_diff = False
+            delta.delta_details.append(
+                f"auth-flip: {baseline.status_code} -> {status_code}"
+            )
 
     # Determine hit/near-miss classification
     if delta.is_no_diff:

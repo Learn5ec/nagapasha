@@ -87,6 +87,31 @@ def triage(
         result.confidence = 1.0
         return result
 
+    # Auth-flip detection (highest confidence): baseline was 401/403, response is 2xx
+    if delta.is_confirmed_hit and delta.delta_details:
+        for detail in delta.delta_details:
+            if "auth-flip" in detail:
+                result.is_hit = True
+                result.confidence = 0.95
+                result.evidence.append(
+                    f"auth-flip: status code changed to 2xx"
+                )
+                return result
+
+    # Auth-artifact detection: new session token/cookie in response
+    if delta.has_new_auth_artifact:
+        result.is_hit = True
+        result.confidence = 0.90
+        evidence_parts = []
+        for detail in delta.delta_details:
+            if "Set-Cookie" in detail or "JWT" in detail or "session field" in detail:
+                evidence_parts.append(detail)
+        result.evidence.append(
+            f"auth-artifact: {'; '.join(evidence_parts)}" if evidence_parts
+            else "auth-artifact: new session token in response"
+        )
+        return result
+
     # Clear hits
     if delta.has_error_signature:
         result.is_hit = True

@@ -106,15 +106,19 @@ class PayloadResult:
     response_body_preview: str = ""
     hit: bool = False
     near_miss: bool = False
+    error: Optional[str] = None  # non-None = internal exception, gate-blocks have status=0 hit=False
 
     @property
     def classification(self) -> str:
-        """HIT | NEAR-MISS | no-diff.
+        """HIT | NEAR-MISS | no-diff | INTERNAL-ERROR.
 
         Derives from the ``hit``/``near_miss`` attributes, falling back to the
         delta flags if those aren't explicitly set (i.e. both are still at their
         defaults of False).
         """
+        # Internal errors win — gate-blocked requests have status=0 but no error
+        if self.error is not None and self.status_code == 0:
+            return "INTERNAL-ERROR"
         # Explicit flags win if set
         if self.hit:
             return "HIT"
@@ -139,13 +143,16 @@ class PayloadResult:
             "elapsed": self.elapsed,
             "hit": self.hit,
             "near_miss": self.near_miss,
+            "error": self.error,
             "delta": self.delta.to_dict() if self.delta else {},
             "evidence": self._evidence(),
         }
 
     def _evidence(self) -> dict[str, str]:
-        """Capture key evidence for HITs/Near-misses."""
+        """Capture key evidence for HITs/Near-misses/Errors."""
         ev: dict[str, str] = {}
+        if self.error is not None:
+            ev["internal_error"] = self.error[:200]
         if self.delta is None:
             return ev
         if self.delta.has_error_signature:
@@ -439,6 +446,7 @@ class PayloadLoop:
                         status_code=0,
                         delta=None,
                         elapsed=0.0,
+                        error=str(r),
                     )
                     for candidate, r in zip(deduped_batch, results)
                 ]
@@ -467,11 +475,17 @@ class PayloadLoop:
                         # Scope errors should propagate (kill switch, out of scope, etc.)
                         raise
                     except Exception as e:
+                        logger.warning(
+                            f"Payload fire failed for {candidate.parameter.name} "
+                            f"({candidate.attack_class}): "
+                            f"{type(e).__name__}: {e}"
+                        )
                         error_result = PayloadResult(
                             candidate=candidate,
                             status_code=0,
                             delta=None,
                             elapsed=0.0,
+                            error=str(e),
                         )
                         if on_result:
                             on_result(error_result)
@@ -675,7 +689,7 @@ class PayloadLoop:
         original_value = param.raw_value
 
         # Build modified request model
-        modified = self._build_request_with_payload(param, candidate.payload)
+        modified = self._build_request_with_payload(param, candidate.payload, raw_body=candidate.raw_body)
 
         # Log payload being fired
         logger.info(f"FIRING PAYLOAD: [{candidate.attack_class}] {candidate.parameter.name}={candidate.payload[:100]}")
@@ -709,6 +723,7 @@ class PayloadLoop:
         self,
         param: ParameterModel,
         payload: str,
+        raw_body: bool = False,
     ) -> RequestModel:
         """Build a modified RequestModel with payload injected.
 
@@ -731,7 +746,7 @@ class PayloadLoop:
             modified.query_params[param.name] = payload
 
         elif param.location == "body_json":
-            if candidate.raw_body:
+            if raw_body:
                 # Raw envelope: send payload directly as body (bypass JSON parsing)
                 modified.body = payload
             else:

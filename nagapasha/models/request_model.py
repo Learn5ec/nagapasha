@@ -89,6 +89,9 @@ class RequestModel:
     run_start: Optional[str] = None
     scope_confirmed: bool = False
 
+    # ---- Stage 3+ outputs (auth-endpoint detection) ------------------------
+    is_auth_endpoint: bool = False  # set after targeting
+
     # --- helpers -----------------------------------------------------------
 
     def to_dict(self) -> dict[str, Any]:

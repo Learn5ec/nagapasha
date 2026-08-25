@@ -19,9 +19,9 @@ from typing import Optional, Any
 # Configuration (from the planning stages)
 # ---------------------------------------------------------------------------
 BASE_URL = 'https://preview.owasp-juice.shop'
-METHOD = 'POST'
-HEADERS = {'accept': 'application/json', 'content-type': 'application/json'}
-COOKIES = {}
+METHOD = 'GET'
+HEADERS = {'Accept': 'application/json, text/plain, */*', 'Accept-Encoding': 'gzip, deflate, br', 'Accept-Language': 'en-GB,en;q=0.9', 'Authorization': 'Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJkYXRhIjp7ImlkIjoxLCJ1c2VybmFtZSI6IiIsImVtYWlsIjoiYWRtaW5AanVpY2Utc2gub3AiLCJwYXNzd29yZCI6IjAxOTIwMjNhN2JiZDczMjUwNTE2ZjA2OWRmMThiNTAwIiwicm9sZSI6ImFkbWluIiwiZGVsdXhlVG9rZW4iOiIiLCJsYXN0TG9naW5JcCI6IjIwMy4wLjExMy40MiIsInByb2ZpbGVJbWFnZSI6ImFzc2V0cy9wdWJsaWMvaW1hZ2VzL3VwbG9hZHMvZGVmYXVsdEFkbWluLnBuZyIsInRvdHBTZWNyZXQiOiIiLCJpc0FjdGl2ZSI6dHJ1ZSwiY3JlYXRlZEF0IjoiMjAyNi0wOC0yNSAwMzoyNjo1Ny44NzggKzAwOjAwIiwidXBkYXRlZEF0IjoiMjAyNi0wOC0yNSAwNDowMTo1Ni4zMzYgKzAwOjAwIiwiZGVsZXRlZEF0IjpudWxsfSwiYmlkIjoxLCJpYXQiOjE3ODc2MzYwNjF9.iAUon_O5ap0SkjwwG-DwYFr3Kqb_7BBlMqlZcQde2w4lPVJGZf_3fqAGWvyk-7c8sTcK50KZpvOxQwbcy0qsThnJ7gC2AaHZuj1GT-etNRpfgguLi1qcfm48UsI5iTD8AkdEdpVxXDpKLfOC9QhpUYbpM5ggE9u0KzSRaB5u1eE', 'Host': 'preview.owasp-juice.shop', 'Priority': 'u=1, i', 'Referer': 'https://preview.owasp-juice.shop/', 'Sec-Ch-Ua': '"Not;A=Brand";v="8", "Chromium";v="150"', 'Sec-Ch-Ua-Mobile': '?0', 'Sec-Ch-Ua-Platform': '"Linux"', 'Sec-Fetch-Dest': 'empty', 'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Site': 'same-origin', 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36'}
+COOKIES = {'cookieconsent_status': 'dismiss', 'language': 'en', 'token': 'eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJkYXRhIjp7ImlkIjoxLCJ1c2VybmFtZSI6IiIsImVtYWlsIjoiYWRtaW5AanVpY2Utc2gub3AiLCJwYXNzd29yZCI6IjAxOTIwMjNhN2JiZDczMjUwNTE2ZjA2OWRmMThiNTAwIiwicm9sZSI6ImFkbWluIiwiZGVsdXhlVG9rZW4iOiIiLCJsYXN0TG9naW5JcCI6IjIwMy4wLjExMy40MiIsInByb2ZpbGVJbWFnZSI6ImFzc2V0cy9wdWJsaWMvaW1hZ2VzL3VwbG9hZHMvZGVmYXVsdEFkbWluLnBuZyIsInRvdHBTZWNyZXQiOiIiLCJpc0FjdGl2ZSI6dHJ1ZSwiY3JlYXRlZEF0IjoiMjAyNi0wOC0yNSAwMzoyNjo1Ny44NzggKzAwOjAwIiwidXBkYXRlZEF0IjoiMjAyNi0wOC0yNSAwNDowMTo1Ni4zMzYgKzAwOjAwIiwiZGVsZXRlZEF0IjpudWxsfSwiYmlkIjoxLCJpYXQiOjE3ODc2MzYwNjF9.iAUon_O5ap0SkjwwG-DwYFr3Kqb_7BBlMqlZcQde2w4lPVJGZf_3fqAGWvyk-7c8sTcK50KZpvOxQwbcy0qsThnJ7gC2AaHZuj1GT-etNRpfgguLi1qcfm48UsI5iTD8AkdEdpVxXDpKLfOC9QhpUYbpM5ggE9u0KzSRaB5u1eE', 'welcomebanner_status': 'dismiss'}
 
 # Rate limit: 10 burst, 4.0 req/s
 RATE_LIMIT_BURST = 10
