@@ -83,12 +83,8 @@ def _build_schema_from(categories: dict) -> dict:
 # Keyword-to-category mapping (deterministic, no LLM required for simple cases)
 # ---------------------------------------------------------------------------
 
+# Map keywords to a single category string (most specific match)
 KEYWORD_TO_CATEGORY = {
-    # Auth bypass
-    "login bypass": "tautology",
-    "auth bypass": "tautology",
-    "password bypass": "tautology",
-    "credential": "tautology",
     # XSS
     "xss": "xss_reflected",
     "cross-site scripting": "xss_reflected",
@@ -103,9 +99,6 @@ KEYWORD_TO_CATEGORY = {
     "local file inclusion": "path_traversal",
     "file read": "path_traversal",
     "file disclosure": "path_traversal",
-    # SQL injection
-    "sql injection": "tautology",  # tautology is the primary SQLi category
-    "sqli": "tautology",
     # Time-based blind
     "time-based": "time_based_blind",
     "blind sql": "time_based_blind",
@@ -119,6 +112,19 @@ KEYWORD_TO_CATEGORY = {
     # Stacked query
     "stacked": "stacked_query",
     "stacked query": "stacked_query",
+}
+
+# Map keywords to AUTH_PRIORITY_CATEGORIES (multi-category resolution)
+# These keywords resolve to BOTH tautology AND boolean_differential for
+# comprehensive auth-endpoint testing (P3-2 fix).
+KEYWORD_TO_AUTH_CATEGORIES: dict[str, tuple[str, ...]] = {
+    "login bypass": ("tautology", "boolean_differential"),
+    "auth bypass": ("tautology", "boolean_differential"),
+    "password bypass": ("tautology", "boolean_differential"),
+    "credential": ("tautology", "boolean_differential"),
+    # SQL injection — use both tautology and boolean for comprehensive coverage
+    "sql injection": ("tautology", "boolean_differential"),
+    "sqli": ("tautology", "boolean_differential"),
 }
 
 # Categories that structurally require Phase E/browser
@@ -156,6 +162,14 @@ async def resolve_intent(
     user_text_lower = user_text.lower()
 
     # Step 1: Deterministic keyword mapping
+    # Multi-category keywords (auth bypass, SQLi) resolve to AUTH_PRIORITY_CATEGORIES
+    # Single-category keywords (XSS, HTML injection, etc.) map to a single category.
+    for keyword, target in KEYWORD_TO_AUTH_CATEGORIES.items():
+        if keyword in user_text_lower:
+            for cat in target:
+                if cat not in resolution.resolved_categories:
+                    resolution.resolved_categories.append(cat)
+
     for keyword, category in KEYWORD_TO_CATEGORY.items():
         if keyword in user_text_lower:
             if category not in resolution.resolved_categories:

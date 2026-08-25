@@ -31,9 +31,9 @@ class TestPathTraversalCategory:
         """A4: path_traversal must be in TECHNIQUE_CATEGORIES."""
         assert "path_traversal" in TECHNIQUE_CATEGORIES
 
-    def test_path_traversal_has_all_variants_in_sql_key(self):
-        """A4: All path_traversal variants are stored under 'sql' key (OS-agnostic)."""
-        variants = TECHNIQUE_CATEGORIES["path_traversal"]["variants"]["sql"]
+    def test_path_traversal_has_all_variants_in_generic_key(self):
+        """A4: path_traversal is dialect_agnostic — variants under 'generic' key."""
+        variants = TECHNIQUE_CATEGORIES["path_traversal"]["variants"]["generic"]
         # Unix variants
         assert any("../../" in v for v in variants)
         assert any("....//" in v for v in variants)  # filter-bypass
@@ -46,6 +46,10 @@ class TestPathTraversalCategory:
         # Wrapper variants
         assert any("php://filter" in v for v in variants)
         assert any("file://" in v for v in variants)
+
+    def test_path_traversal_is_dialect_agnostic(self):
+        """A4: path_traversal must be marked dialect_agnostic (not SQL-specific)."""
+        assert TECHNIQUE_CATEGORIES["path_traversal"].get("dialect_agnostic") is True
 
     def test_path_traversal_in_target_locations(self):
         """A4: path_traversal must be in CATEGORY_TARGET_LOCATIONS."""

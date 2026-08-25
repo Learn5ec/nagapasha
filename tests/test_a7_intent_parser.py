@@ -118,23 +118,27 @@ class TestKeywordMapping:
         ("cross-site scripting", "xss_reflected"),
         ("html injection", "html_injection"),
         ("path traversal", "path_traversal"),
-        ("sql injection", "tautology"),
         ("boolean blind", "boolean_differential"),
         ("union", "union_based"),
         ("stacked query", "stacked_query"),
         ("time-based", "time_based_blind"),
-        ("login bypass", "tautology"),
-        ("auth bypass", "tautology"),
     ])
     def test_keyword_mappings(self, keyword, expected_category):
         """A7: All known keyword mappings must return expected categories."""
         assert KEYWORD_TO_CATEGORY[keyword] == expected_category
 
+    def test_auth_bypass_keywords_resolve_to_auth_priority(self):
+        """P3-2: 'login bypass', 'auth bypass', 'sql injection' must resolve to AUTH_PRIORITY_CATEGORIES."""
+        from nagapasha.stages.stage06_intent import KEYWORD_TO_AUTH_CATEGORIES
+        from nagapasha.utils.technique_categories import AUTH_PRIORITY_CATEGORIES
+        for keyword in ("login bypass", "auth bypass", "password bypass", "credential", "sql injection", "sqli"):
+            assert KEYWORD_TO_AUTH_CATEGORIES[keyword] == AUTH_PRIORITY_CATEGORIES, \
+                f"{keyword!r} must resolve to AUTH_PRIORITY_CATEGORIES {AUTH_PRIORITY_CATEGORIES}"
+
     @pytest.mark.parametrize("keyword", [
         "xss",
         "html injection",
         "path traversal",
-        "sql injection",
         "boolean blind",
         "union",
         "time-based",
@@ -142,6 +146,20 @@ class TestKeywordMapping:
     def test_keyword_mapping_case_insensitive(self, keyword):
         """A7: Keyword matching must be case-insensitive (handled in resolve_intent)."""
         assert KEYWORD_TO_CATEGORY[keyword] in TECHNIQUE_CATEGORIES
+
+    @pytest.mark.parametrize("keyword", [
+        "sql injection",
+        "login bypass",
+        "auth bypass",
+        "credential",
+    ])
+    def test_auth_keyword_mapping_case_insensitive(self, keyword):
+        """A7: Auth keyword matching must resolve to valid categories."""
+        from nagapasha.stages.stage06_intent import KEYWORD_TO_AUTH_CATEGORIES
+        from nagapasha.utils.technique_categories import TECHNIQUE_CATEGORIES, AUTH_PRIORITY_CATEGORIES
+        for cat in KEYWORD_TO_AUTH_CATEGORIES[keyword]:
+            assert cat in TECHNIQUE_CATEGORIES
+            assert cat in AUTH_PRIORITY_CATEGORIES
 
 
 # ---------------------------------------------------------------------------

@@ -115,6 +115,7 @@ TECHNIQUE_CATEGORIES: dict[str, dict[str, Any]] = {
     },
     "xss_reflected": {
         "description": "Reflected XSS payloads designed to execute or be visibly unescaped in HTML context",
+        "dialect_agnostic": True,
         "variants": {
             "html_context": [
                 "<script>alert(1)</script>",
@@ -143,6 +144,7 @@ TECHNIQUE_CATEGORIES: dict[str, dict[str, Any]] = {
     },
     "html_injection": {
         "description": "Non-scripting markup injection — detects missing output encoding",
+        "dialect_agnostic": True,
         "variants": {
             "structural": [
                 "<h1>INJECTED</h1>",
@@ -154,8 +156,9 @@ TECHNIQUE_CATEGORIES: dict[str, dict[str, Any]] = {
     },
     "path_traversal": {
         "description": "File path traversal to read arbitrary files or expose source code",
+        "dialect_agnostic": True,
         "variants": {
-            "sql": [  # All variants (OS-agnostic — not SQL-specific)
+            "generic": [
                 "../../../etc/passwd",
                 "....//....//....//etc/passwd",          # filter-bypass (strip-one-pass)
                 "..%2f..%2f..%2fetc%2fpasswd",            # single URL-encoded

@@ -115,6 +115,7 @@ class PayloadResult:
     hit: bool = False
     near_miss: bool = False
     error: Optional[str] = None  # non-None = internal exception, gate-blocks have status=0 hit=False
+    scan_phase: str = "default"  # P2-1: "default" (default scan) or "user_directed" (focused scan)
 
     @property
     def classification(self) -> str:
@@ -152,6 +153,7 @@ class PayloadResult:
             "hit": self.hit,
             "near_miss": self.near_miss,
             "error": self.error,
+            "scan_phase": self.scan_phase,
             "delta": self.delta.to_dict() if self.delta else {},
             "evidence": self._evidence(),
         }

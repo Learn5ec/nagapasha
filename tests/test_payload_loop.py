@@ -113,6 +113,31 @@ class TestPayloadResult:
         assert d["status_code"] == 200
         assert d["delta"]["has_reflected_payload"] is True
 
+    def test_scan_phase_default(self):
+        """P2-1: scan_phase must default to 'default' for standard scans."""
+        candidate = _make_candidate(_make_param(), "<script>")
+        result = PayloadResult(
+            candidate=candidate,
+            status_code=200,
+            delta=None,
+            elapsed=0.1,
+        )
+        assert result.scan_phase == "default"
+
+    def test_scan_phase_user_directed(self):
+        """P2-1: scan_phase can be set to 'user_directed' for focused scans."""
+        candidate = _make_candidate(_make_param(), "<script>")
+        result = PayloadResult(
+            candidate=candidate,
+            status_code=200,
+            delta=None,
+            elapsed=0.1,
+            scan_phase="user_directed",
+        )
+        assert result.scan_phase == "user_directed"
+        d = result.to_dict()
+        assert d["scan_phase"] == "user_directed"
+
 
 class TestPayloadLoop:
     def test_build_request_with_query_payload(self):

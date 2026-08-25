@@ -1411,14 +1411,68 @@ def _build_technique_category_payloads(
     dialects: list[str] = ["sql"]  # default
     if "express" in framework or "node" in framework:
         dialects.append("nosql")
-    if "django" in language or "flask" in language:
-        dialects.append("nosql")
+    # NOTE: Django/Flask are NOT added to nosql dialects — they typically
+    # use SQL databases. The previous heuristic was backwards (P3-1 fix).
 
     # For each selected category, generate payloads
     for category_name in selected_categories:
         category = TECHNIQUE_CATEGORIES.get(category_name, {})
         variants = category.get("variants", {})
 
+        # dialect_agnostic categories (XSS, HTML injection, path traversal):
+        # Variants are not keyed by SQL/NoSQL/Template dialect — emit all
+        # variants regardless of dialect_hint or tech-stack.
+        if category.get("dialect_agnostic"):
+            for _variant_key, variant_list in variants.items():
+                if not variant_list:
+                    continue
+
+                if isinstance(variant_list, dict):
+                    # Boolean-differential style (true/false) inside a dialect_agnostic category
+                    for truth_key in ("true", "false"):
+                        payloads = variant_list.get(truth_key, [])
+                        tag = "true_condition" if truth_key == "true" else "false_condition"
+                        for p in payloads:
+                            fitted = _fit_payload_for_param(
+                                param=param,
+                                attack_class=category_name,
+                                payload=p,
+                                tech_stack=tech_stack,
+                                waf_detected=waf_detected,
+                                waf_name=waf_name,
+                            )
+                            candidates.append(PayloadCandidate(
+                                parameter=param,
+                                payload=fitted,
+                                attack_class=category_name,
+                                payload_tags=[category_name, _variant_key, tag],
+                                rationale=f"{category_name} ({_variant_key}) {tag} payload",
+                            ))
+                else:
+                    for payload in variant_list:
+                        if isinstance(payload, tuple):
+                            payload_str = payload[0]
+                        else:
+                            payload_str = payload
+
+                        fitted = _fit_payload_for_param(
+                            param=param,
+                            attack_class=category_name,
+                            payload=payload_str,
+                            tech_stack=tech_stack,
+                            waf_detected=waf_detected,
+                            waf_name=waf_name,
+                        )
+                        candidates.append(PayloadCandidate(
+                            parameter=param,
+                            payload=fitted,
+                            attack_class=category_name,
+                            payload_tags=[category_name, _variant_key, "all"],
+                            rationale=f"{category_name} payload ({_variant_key})",
+                        ))
+            continue
+
+        # Non-dialect_agnostic: iterate per dialect (sql/nosql/template)
         for dialect in dialects:
             dialect_variants = variants.get(dialect)
             if not dialect_variants:

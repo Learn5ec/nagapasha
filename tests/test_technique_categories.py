@@ -6,6 +6,8 @@ Verifies:
 - Tuples carry dialect tags
 - AUTH_PRIORITY_CATEGORIES covers auth-endpoint credential fields
 - XSS and HTML-injection categories have proper sub-context structure
+- Every category produces at least one PayloadCandidate via the real generator (P0-3)
+- dialect_agnostic flag is set correctly for categories with non-dialect variant keys
 """
 
 import pytest
@@ -147,3 +149,128 @@ class TestHtmlInjectionCategory:
         assert any("<img" in v for v in variants)
         assert any("<hr>" in v for v in variants)
         assert any("<iframe" in v for v in variants)
+
+
+# ---------------------------------------------------------------------------
+# P0-3: Generation-path regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestDialectAgnosticFlag:
+    """P0-3: Verify dialect_agnostic flag is set on categories with non-dialect variant keys."""
+
+    def test_xss_reflected_is_dialect_agnostic(self):
+        """P0-3: xss_reflected must be marked dialect_agnostic (variants keyed by html_context, etc., not dialect)."""
+        assert TECHNIQUE_CATEGORIES["xss_reflected"].get("dialect_agnostic") is True
+
+    def test_html_injection_is_dialect_agnostic(self):
+        """P0-3: html_injection must be marked dialect_agnostic."""
+        assert TECHNIQUE_CATEGORIES["html_injection"].get("dialect_agnostic") is True
+
+    def test_path_traversal_is_dialect_agnostic(self):
+        """P0-3: path_traversal must be marked dialect_agnostic (variants are OS-agnostic, not SQL-specific)."""
+        assert TECHNIQUE_CATEGORIES["path_traversal"].get("dialect_agnostic") is True
+
+    def test_non_dialect_agnostic_categories_are_not_flagged(self):
+        """P0-3: Categories with dialect keys must NOT have dialect_agnostic flag."""
+        for cat_name in ("comment_terminator", "tautology", "boolean_differential",
+                         "time_based_blind", "union_based", "stacked_query"):
+            assert TECHNIQUE_CATEGORIES[cat_name].get("dialect_agnostic") is not True, \
+                f"{cat_name} should not have dialect_agnostic=True"
+
+
+class TestGenerationPath:
+    """P0-3: Every technique category must produce at least one PayloadCandidate via the real generator."""
+
+    def _make_param(self, name="test", location="query"):
+        from nagapasha.models.request_model import ParameterModel
+        return ParameterModel(
+            name=name,
+            location=location,
+            inferred_type="free_text",
+            raw_value="testvalue",
+            is_fuzz_target=True,
+            do_not_fuzz=False,
+        )
+
+    def _make_req(self, dialect_hint=None, is_auth_endpoint=False):
+        from nagapasha.models.request_model import RequestModel
+        return RequestModel(
+            method="GET",
+            url="http://example.com/api/test",
+            base_url="http://example.com",
+            headers={"Host": "example.com"},
+            dialect_hint=dialect_hint,
+            is_auth_endpoint=is_auth_endpoint,
+        )
+
+    def _build_payloads(self, req, param):
+        from nagapasha.cli import _build_technique_category_payloads
+        return _build_technique_category_payloads(
+            param=param,
+            req=req,
+            tech_stack=None,
+            waf_detected=False,
+            waf_name=None,
+            dialect_hint=req.dialect_hint,
+        )
+
+    def test_every_technique_category_produces_at_least_one_candidate(self):
+        """P0-3: Every category in TECHNIQUE_CATEGORIES must emit ≥1 PayloadCandidate.
+
+        This is the structural regression test: if a new category is added with
+        non-dialect variant keys (like xss_reflected was), and the generator is
+        not updated to handle dialect_agnostic categories, this test fails.
+        """
+        req = self._make_req(dialect_hint=None)
+        param = self._make_param()
+        candidates = self._build_payloads(req, param)
+
+        # Group candidates by attack_class
+        by_class = {}
+        for c in candidates:
+            by_class.setdefault(c.attack_class, []).append(c)
+
+        missing = []
+        for cat_name in TECHNIQUE_CATEGORIES:
+            if cat_name not in by_class or len(by_class[cat_name]) == 0:
+                missing.append(cat_name)
+
+        assert not missing, \
+            f"Categories that produced 0 payloads: {missing}. " \
+            "All categories must produce ≥1 candidate via the generator."
+
+    def test_xss_reflected_emits_payloads(self):
+        """P0-3: xss_reflected must emit payloads (proves the P0-1/P0-2 fix works)."""
+        req = self._make_req()
+        param = self._make_param()
+        candidates = self._build_payloads(req, param)
+
+        xss_candidates = [c for c in candidates if c.attack_class == "xss_reflected"]
+        assert len(xss_candidates) >= 1, "xss_reflected must emit at least 1 payload"
+        payload_texts = [c.payload for c in xss_candidates]
+        # _fit_payload_for_param URL-encodes payloads — check for encoded <script>
+        assert any("%3Cscript" in p or "<script>" in p for p in payload_texts)
+
+    def test_html_injection_emits_payloads(self):
+        """P0-3: html_injection must emit payloads (proves the P0-1/P0-2 fix works)."""
+        req = self._make_req()
+        param = self._make_param()
+        candidates = self._build_payloads(req, param)
+
+        html_candidates = [c for c in candidates if c.attack_class == "html_injection"]
+        assert len(html_candidates) >= 1, "html_injection must emit at least 1 payload"
+        payload_texts = [c.payload for c in html_candidates]
+        # Check for encoded or raw <h1> payload
+        assert any("%3Ch1" in p or "<h1>" in p for p in payload_texts)
+
+    def test_path_traversal_emits_payloads(self):
+        """P0-3: path_traversal must emit payloads (proves the P0-1/P0-2 fix works)."""
+        req = self._make_req()
+        param = self._make_param()
+        candidates = self._build_payloads(req, param)
+
+        pt_candidates = [c for c in candidates if c.attack_class == "path_traversal"]
+        assert len(pt_candidates) >= 1, "path_traversal must emit at least 1 payload"
+        payload_texts = [c.payload for c in pt_candidates]
+        assert any("../../" in p for p in payload_texts)
