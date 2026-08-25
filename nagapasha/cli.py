@@ -101,6 +101,11 @@ def cicd(
         help="JSON string with tech-stack overrides: "
              '{"server": "nginx", "database": "postgresql", "framework": "flask"}'
     ),
+    intent: Optional[str] = typer.Option(
+        None, "--intent",
+        help="Natural-language request for surplus scan (e.g. 'test for XSS in JSON params'). "
+             "Resolves into technique-category keys for a second focused scan phase."
+    ),
     no_authorization_required: bool = typer.Option(
         False, "--no-authorization-required",
         help="Explicitly disable security gates (not recommended for live targets)",
@@ -236,6 +241,61 @@ def cicd(
     )
 
     results = asyncio.run(loop.run())
+
+    # Phase 2: intent-based surplus scan (CI/CD)
+    phase_two_results = {}
+    intent_resolution = None
+    if intent:
+        console.print(f"\n[bold]Resolving intent:[/bold] {intent}")
+        try:
+            from nagapasha.stages.stage06_intent import resolve_intent
+            tech_stack = req.tech_stack_context
+
+            async def _cicd_phase2():
+                ir = await resolve_intent(
+                    user_text=intent,
+                    tech_stack=tech_stack,
+                    request_model=req,
+                )
+                if ir.resolved_categories:
+                    console.print(f"  Resolved: {', '.join(ir.resolved_categories)}")
+                    if ir.unsupported_asks:
+                        console.print(f"  [yellow]Unsupported: {', '.join(ir.unsupported_asks)}[/yellow]")
+                    if ir.out_of_reach_asks:
+                        console.print(f"  [yellow]Out of reach: {len(ir.out_of_reach_asks)} ask(s)[/yellow]")
+                    return await _run_phase_two_scan(
+                        req=req,
+                        baseline=baseline,
+                        payloads=payloads,
+                        intent_resolution=ir,
+                        rate_config=rate_config,
+                        max_requests=max_requests,
+                        batch_size=batch_size,
+                        engagement_context=engagement_context,
+                        host_allowlist=host_allowlist,
+                        restore_after=restore_after,
+                        _on_result=lambda r: None,
+                        allow_destructive=(
+                            engagement_context.settings.get("allow_destructive", False)
+                            if engagement_context else False
+                        ),
+                    )
+                else:
+                    console.print(f"  [yellow]{ir.rationale}[/yellow]")
+                    return {}
+
+            phase_two_results = asyncio.run(_cicd_phase2())
+            intent_resolution = phase_two_results.get("intent")
+            if phase_two_results:
+                merged = phase_two_results.get("merged", phase_two_results.get("phase_two", {}))
+                results = {
+                    "total_fired": merged.get("total_fired", results["total_fired"]),
+                    "hits": merged.get("hits", results["hits"]),
+                    "near_misses": merged.get("near_misses", results["near_misses"]),
+                }
+        except Exception as e:
+            logger.warning(f"Intent resolution failed: {e}")
+            console.print(f"  [yellow]Intent resolution failed: {e}[/yellow]")
 
     # Create report
     from nagapasha.stages.stage12_reporting import Report
@@ -818,6 +878,11 @@ def full(
         help="JSON string with tech-stack overrides: "
              '{"server": "nginx", "database": "postgresql", "framework": "flask"}'
     ),
+    intent: Optional[str] = typer.Option(
+        None, "--intent",
+        help="Natural-language request for surplus scan (e.g. 'test for XSS in JSON params'). "
+             "Resolves into technique-category keys for a second focused scan phase."
+    ),
     no_authorization_required: bool = typer.Option(
         False, "--no-authorization-required",
         help="Explicitly disable security gates (not recommended for live targets)",
@@ -1006,6 +1071,65 @@ def full(
 
     # Capture results
     results = asyncio.run(loop.run(on_result=_on_result))
+
+    # Phase 2: intent-based surplus scan
+    phase_two_results = {}
+    intent_resolution = None
+    if intent:
+        console.print(f"\n[bold]Resolving intent:[/bold] {intent}")
+        try:
+            from nagapasha.stages.stage06_intent import resolve_intent
+            tech_stack = req.tech_stack_context
+
+            async def _phase2():
+                ir = await resolve_intent(
+                    user_text=intent,
+                    tech_stack=tech_stack,
+                    request_model=req,
+                )
+                if ir.resolved_categories:
+                    console.print(f"  Resolved: {', '.join(ir.resolved_categories)}")
+                    if ir.unsupported_asks:
+                        console.print(f"  [yellow]Unsupported: {', '.join(ir.unsupported_asks)}[/yellow]")
+                    if ir.out_of_reach_asks:
+                        console.print(f"  [yellow]Out of reach: {len(ir.out_of_reach_asks)} ask(s)[/yellow]")
+                    return await _run_phase_two_scan(
+                        req=req,
+                        baseline=baseline,
+                        payloads=payloads,
+                        intent_resolution=ir,
+                        rate_config=rate_config,
+                        max_requests=max_requests,
+                        batch_size=batch_size,
+                        engagement_context=engagement_context,
+                        host_allowlist=host_allowlist,
+                        restore_after=restore_after,
+                        _on_result=_on_result,
+                        allow_destructive=(
+                            engagement_context.settings.get("allow_destructive", False)
+                            if engagement_context else False
+                        ),
+                    )
+                else:
+                    console.print(f"  [yellow]{ir.rationale}[/yellow]")
+                    return {}
+
+            phase_two_results = asyncio.run(_phase2())
+            intent_resolution = phase_two_results.get("intent")
+            if phase_two_results:
+                # Merge phase_two results into overall results
+                merged = phase_two_results.get("merged", phase_two_results.get("phase_two", {}))
+                results = {
+                    "total_fired": merged.get("total_fired", results["total_fired"]),
+                    "hits": merged.get("hits", results["hits"]),
+                    "near_misses": merged.get("near_misses", results["near_misses"]),
+                    "no_diff": merged.get("no_diff", results["no_diff"]),
+                    "elapsed_seconds": merged.get("elapsed_seconds", results["elapsed_seconds"]),
+                    "requests_per_second": merged.get("requests_per_second", results["requests_per_second"]),
+                }
+        except Exception as e:
+            logger.warning(f"Intent resolution failed: {e}")
+            console.print(f"  [yellow]Intent resolution failed: {e}[/yellow]")
 
     # Summary
     console.print("\n[bold]Execution Summary:[/bold]")
@@ -1368,6 +1492,131 @@ def _build_technique_category_payloads(
                     ))
 
     return candidates
+
+
+def _filter_payloads_by_categories(
+    payloads: list[PayloadCandidate],
+    categories: list[str],
+) -> list[PayloadCandidate]:
+    """Filter PayloadCandidate list to only those matching the given categories.
+
+    A payload matches if its attack_class equals one of the category names,
+    OR if its payload_tags contains one of the category names.
+
+    Args:
+        payloads: Full payload list from default scan
+        categories: Technique categories to keep (e.g. ['xss_reflected', 'path_traversal'])
+
+    Returns:
+        Filtered payload list
+    """
+    if not categories:
+        return []
+    valid = set(categories)
+    filtered = []
+    for p in payloads:
+        if p.attack_class in valid:
+            filtered.append(p)
+            continue
+        if p.payload_tags:
+            for tag in p.payload_tags:
+                if tag in valid:
+                    filtered.append(p)
+                    break
+    return filtered
+
+
+async def _run_phase_two_scan(
+    req: RequestModel,
+    baseline,
+    payloads: list,
+    intent_resolution,
+    rate_config,
+    max_requests: int,
+    batch_size: int,
+    engagement_context,
+    host_allowlist,
+    restore_after: bool,
+    _on_result: Callable,
+    allow_destructive: bool,
+) -> dict:
+    """Run a second (surplus) payload loop focused on intent-resolved categories.
+
+    Returns merged results dict with both phases' data.
+    """
+    from nagapasha.engine.payload_loop import PayloadLoop
+
+    resolved = intent_resolution.resolved_categories
+    if not resolved:
+        logger.info("Intent resolved to 0 categories — skipping surplus scan")
+        return {
+            "phase_one": {},
+            "phase_two": {
+                "total_fired": 0,
+                "hits": 0,
+                "near_misses": 0,
+                "no_diff": 0,
+                "elapsed_seconds": 0,
+                "requests_per_second": 0,
+            },
+            "intent": intent_resolution,
+            "merged": {},
+        }
+
+    # Filter payloads by resolved categories
+    surplus_payloads = _filter_payloads_by_categories(payloads, resolved)
+    if not surplus_payloads:
+        logger.info("No payloads match resolved intent categories — skipping surplus scan")
+        return {
+            "phase_one": {},
+            "phase_two": {
+                "total_fired": 0,
+                "hits": 0,
+                "near_misses": 0,
+                "no_diff": 0,
+                "elapsed_seconds": 0,
+                "requests_per_second": 0,
+            },
+            "intent": intent_resolution,
+            "merged": {},
+        }
+
+    console.print(f"\n[bold]Phase 2 — Surplus scan:[/bold] {len(surplus_payloads)} payloads")
+    console.print(f"  Categories: {', '.join(resolved)}")
+
+    phase2_loop = PayloadLoop(
+        request_model=req,
+        baseline_fingerprint=baseline,
+        payloads=surplus_payloads,
+        rate_limit_pps=rate_config.refill_rate,
+        rate_limit_burst=rate_config.burst,
+        max_requests=max_requests,
+        batch_size=batch_size,
+        engagement_context=engagement_context,
+        allow_destructive=allow_destructive,
+        host_allowlist=host_allowlist,
+        restore_after=restore_after,
+    )
+
+    phase2_results = asyncio.run(phase2_loop.run(on_result=_on_result))
+
+    # Merge: phase_two results include phase_one for total counts
+    phase_one_total = phase2_results.get("phase_one_total", 0)
+    merged = {
+        "total_fired": phase2_results.get("total_fired", 0) + phase_one_total,
+        "hits": phase2_results.get("hits", 0),
+        "near_misses": phase2_results.get("near_misses", 0),
+        "no_diff": phase2_results.get("no_diff", 0),
+        "elapsed_seconds": phase2_results.get("elapsed_seconds", 0),
+        "requests_per_second": phase2_results.get("requests_per_second", 0),
+    }
+
+    return {
+        "phase_one": {"total_fired": phase_one_total},
+        "phase_two": phase2_results,
+        "intent": intent_resolution,
+        "merged": merged,
+    }
 
 
 def _default_payloads_for_type(param_type: str) -> list[str]:
