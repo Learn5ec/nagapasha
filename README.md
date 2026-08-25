@@ -64,6 +64,20 @@ A multi-agent, self-scoping fuzzing tool that takes a single curl request and tu
 - **Retention Policy**: Automatic cleanup of expired engagement data
 - **LLM Input Hygiene**: Evidence validation before HIT escalation
 
+### Outcome-Based Detection (Phase 6)
+
+- **Auth-flip detection**: 401/403 → 2xx bypass signal — any injection that successfully bypasses auth
+- **Auth-artifact detection**: New `Set-Cookie`, JWT-shaped token, or session field in response — confirms success regardless of technique
+- **Broadened error signatures**: SQL, NoSQL driver errors (MongoServerError, PymongoError), template engine errors (TemplateSyntaxError), shell patterns (sh:, bash:, /bin/)
+- **Differential pair detection**: Compare true-condition vs false-condition responses against each other — dialect-agnostic boolean-blind (SQL `AND 1=1`/`AND 1=2`, NoSQL `$ne` null/$eq "")
+- **Timing anomaly detection**: Rolling-window response time monitoring — flags blind/time-based injection by side effect (>3x baseline AND >2x rolling mean)
+- **Payload reflection**: Payload string visible in response body — detected reflected XSS, reflected injection, template echo
+- **Status change detection**: Large status delta (≥100 points) — e.g. 200 → 500
+- **Technique-category payload generation**: 6 categories (comment_terminator, tautology, boolean_differential, time_based_blind, union_based, stacked_query) with SQL/NoSQL/template dialect variants
+- **Auth-endpoint auto-detection**: URL path + body content co-occurrence triggers prioritized technique selection
+- **Report softening**: Yellow warning when auth endpoint tested with 0 hits — "does not prove absence of vulnerabilities"
+- **Internal error tracking**: Payload loop error field, exception logging, red INTERNAL-ERROR output in CLI
+
 ## Installation
 
 ```bash
@@ -233,6 +247,7 @@ nagapasha full "curl -X GET 'https://example.com/api'" --batch-size 4 --resume c
 | 4 | Dashboard (FastAPI + WebSocket) | ✅ |
 | 5 | Batch firing, checkpoint, dedup, dry-run, CI/CD | ✅ |
 | 2.5 | Payload provenance vetting | ✅ |
+| 6 | Outcome-based detection engine, technique categories | ✅ |
 | 8.5 | Destructive payload confirmation | ✅ |
 | 9.5 | Continuous recalibration | ✅ |
 | 13 | Evidence integrity & redaction | ✅ |
@@ -285,12 +300,14 @@ nagapasha/
 │   │   ├── rate_limiter.py       # Token bucket rate limiter
 │   │   ├── jwt_watchdog.py       # JWT detection & expiry
 │   │   ├── baseline.py           # Baseline capture
-│   │   ├── diff.py               # Response diffing
+│   │   ├── diff.py               # Response diffing (auth-flip, auth-artifact, broadened error sigs)
 │   │   ├── payload_loop.py       # Payload execution loop (batch, checkpoint, recalibration)
 │   │   ├── recalibration.py      # NEW: WAF monitoring & baseline drift
 │   │   ├── dedup.py              # Payload deduplication (identity_hash)
 │   │   ├── template.py           # Engagement template manager
-│   │   └── triage.py             # Heuristic response triage
+│   │   ├── triage.py             # Heuristic response triage (auth-flip, auth-artifact signals)
+│   │   ├── differential.py       # NEW: Generalized boolean-blind differential detection
+│   │   └── timing_anomaly.py     # NEW: Rolling-window timing-anomaly monitor
 │   ├── security/
 │   │   ├── signing.py            # HMAC request signing
 │   │   ├── exfil.py              # Host allowlist exfiltration prevention
@@ -308,7 +325,9 @@ nagapasha/
 │       ├── paths.py              # NEW: Path utilities
 │       ├── config.py             # NEW: Configuration management
 │       ├── scope_guard.py        # Authorization & kill switch
-│       └── notifications.py      # OS-native + Slack
+│       ├── notifications.py      # OS-native + Slack
+│       ├── auth_detect.py        # NEW: Auth-endpoint auto-detection
+│       └── technique_categories.py # NEW: Technique-category payload data (SQL/NoSQL/template)
 ├── dashboard/
 │   ├── __init__.py               # Module-scoped EventBus + ActiveRuns singletons
 │   ├── app.py                    # FastAPI app + CLI entry
@@ -324,7 +343,7 @@ nagapasha/
 │   ├── raw-plan.md               # Original specification
 │   ├── current-implementation.md # What is built
 │   └── future-implementation.md  # What's planned
-├── tests/                        # 383 tests, all passing
+├── tests/                        # 392 tests, all passing
 ├── pyproject.toml
 ├── setup.py                      # Interactive setup wizard
 ├── .env.example                  # Example environment file
@@ -335,7 +354,7 @@ nagapasha/
 
 ```bash
 pytest tests/ -v
-# 383 tests, all passing
+# 392 tests, all passing
 ```
 
 ## Guardrails
