@@ -1074,6 +1074,7 @@ async def _build_payload_candidates(
             tech_stack=req.confirmed_tech_stack,
             waf_detected=recon_result.waf_detected if recon_result else False,
             waf_name=recon_result.waf_name if recon_result else None,
+            dialect_hint=req.dialect_hint,
         )
         for tc_payload in tech_payloads:
             candidates.append(tc_payload)
@@ -1184,6 +1185,7 @@ def _build_technique_category_payloads(
     tech_stack: Optional[dict[str, Any]] = None,
     waf_detected: bool = False,
     waf_name: Optional[str] = None,
+    dialect_hint: Optional[str] = None,
 ) -> list[PayloadCandidate]:
     """Build PayloadCandidates from technique categories in the KB.
 
@@ -1191,7 +1193,12 @@ def _build_technique_category_payloads(
     parameter's location and the request's auth-endpoint status. Auth-endpoint
     detection raises priority for tautology and boolean_differential categories
     targeting credential fields. Dialect variants are selected based on
-    tech-stack fingerprinting when available.
+    tech-stack fingerprinting when available, or an explicit dialect_hint.
+
+    When dialect_hint is set (e.g. "postgres"), only payloads tagged for that
+    dialect are emitted for "sql" variants — non-tagged or cross-dialect payloads
+    (like comment terminators and tautologies) are still emitted since they
+    apply across SQL dialects.
     """
     candidates: list[PayloadCandidate] = []
     from nagapasha.utils.technique_categories import (
@@ -1211,12 +1218,19 @@ def _build_technique_category_payloads(
         else:
             selected_categories = list(TECHNIQUE_CATEGORIES.keys())
 
-    # Select dialect variants based on tech stack
+    # Resolve dialect_hint: explicit > auto-detected
+    effective_dialect = dialect_hint
+    if not effective_dialect and req.confirmed_tech_stack:
+        db = req.confirmed_tech_stack.get("database", "").lower()
+        if db:
+            effective_dialect = db
+
+    # Select dialect variants based on tech stack (for nosql/template selection)
     tech = tech_stack or {}
     framework = tech.get("framework", "").lower()
     language = tech.get("language", "").lower()
 
-    # Determine which dialects to use
+    # Determine which dialects to use (beyond sql)
     dialects: list[str] = ["sql"]  # default
     if "express" in framework or "node" in framework:
         dialects.append("nosql")
@@ -1270,12 +1284,24 @@ def _build_technique_category_payloads(
                         rationale=f"False-condition {category_name} payload ({dialect})",
                     ))
             else:
-                # List of payloads
+                # List of payloads — may be plain strings or (payload, dialect_tag) tuples
                 for payload in dialect_variants:
+                    # Handle (payload_string, dialect_tag) tuple format
+                    if isinstance(payload, tuple):
+                        payload_str, payload_dialect = payload[0], payload[1]
+                    else:
+                        payload_str = payload
+                        payload_dialect = None
+
+                    # Filter by dialect_hint: emit if no tag, or if tag matches hint
+                    if effective_dialect and payload_dialect is not None:
+                        if payload_dialect != effective_dialect:
+                            continue
+
                     fitted = _fit_payload_for_param(
                         param=param,
                         attack_class=category_name,
-                        payload=payload,
+                        payload=payload_str,
                         tech_stack=tech_stack,
                         waf_detected=waf_detected,
                         waf_name=waf_name,
@@ -1284,8 +1310,8 @@ def _build_technique_category_payloads(
                         parameter=param,
                         payload=fitted,
                         attack_class=category_name,
-                        payload_tags=[category_name, dialect],
-                        rationale=f"{category_name} payload ({dialect})",
+                        payload_tags=[category_name, dialect, payload_dialect or "all"],
+                        rationale=f"{category_name} payload ({dialect}{f': {payload_dialect}' if payload_dialect else ''})",
                     ))
 
     return candidates

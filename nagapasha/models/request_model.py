@@ -77,6 +77,7 @@ class RequestModel:
 
     # ---- Stage 4 outputs --------------------------------------------------
     confirmed_tech_stack: Optional[dict[str, Any]] = None
+    dialect_hint: Optional[str] = None   # explicit dialect override (e.g. "postgres", "mysql")
 
     # ---- Stage 5-8 outputs (attack specs per-parameter) ------------------
     attack_specs: list[dict[str, Any]] = field(default_factory=list)
