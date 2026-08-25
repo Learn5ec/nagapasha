@@ -47,6 +47,17 @@ ERROR_SIGNATURES = [
     re.compile(r"(?i)allow_url_include", re.DOTALL),
 ]
 
+# A4: Positive file-content signatures — successful path traversal returns
+# actual file content, not an error. These are *confirmations* of disclosure.
+FILE_CONTENT_SIGNATURES = [
+    re.compile(r"root:.*:0:0:", re.DOTALL),              # /etc/passwd
+    re.compile(r"\[boot loader\]", re.DOTALL),            # windows win.ini
+    re.compile(r"\[fonts\]", re.DOTALL),                   # windows win.ini
+    re.compile(r"<\?php", re.DOTALL),                      # raw PHP source disclosure via wrapper
+    re.compile(r"BEGIN PUBLIC KEY", re.DOTALL),            # SSH/public key files
+    re.compile(r"-----BEGIN RSA PRIVATE KEY-----", re.DOTALL),  # private key exposure
+]
+
 
 @dataclass
 class BaselineFingerprint:
@@ -288,6 +299,17 @@ def compute_delta(
             delta.delta_details.append(f"error-signature matched: {sig.pattern[:60]}")
             break
 
+    # A4: File content disclosure detection — positive content signatures
+    # A successful path traversal returns real file content, not an error
+    for sig in FILE_CONTENT_SIGNATURES:
+        if sig.search(body):
+            delta.has_file_disclosure = True
+            delta.is_no_diff = False
+            delta.delta_details.append(
+                f"file-disclosure: positive content signature matched: {sig.pattern[:60]}"
+            )
+            break
+
     # Auth artifact detection: new session token / cookie / session field
     # catching the *effect* of a successful bypass, not the cause
     baseline_had_set_cookie = "set-cookie" in baseline.header_names
@@ -337,11 +359,13 @@ def compute_delta(
     if delta.is_no_diff:
         return delta
 
-    # Confirmed hit: error signature or unescaped payload reflection
+    # Confirmed hit: error signature, unescaped payload reflection, or file disclosure
     # HTML-escaped reflection is NOT a confirmed hit (payload is safely encoded)
     if delta.has_error_signature:
         delta.is_confirmed_hit = True
     elif delta.has_reflected_payload and delta.reflection_context == "unescaped":
+        delta.is_confirmed_hit = True
+    elif delta.has_file_disclosure:
         delta.is_confirmed_hit = True
 
     # Near-miss: status code changed but no error/reflection
