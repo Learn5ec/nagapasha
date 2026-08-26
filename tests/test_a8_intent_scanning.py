@@ -13,6 +13,7 @@ import pytest
 import asyncio
 from dataclasses import dataclass, field
 from typing import Optional, Callable, Any
+from unittest.mock import MagicMock
 
 from nagapasha.stages.stage06_intent import IntentResolution
 from nagapasha.models.request_model import RequestModel, ParameterModel
@@ -201,7 +202,7 @@ class TestPhaseTwoScan:
 
         results = await _run_phase_two_scan(
             req=req,
-            baseline=None,
+            phase1_loop=MagicMock(),
             payloads=payloads,
             intent_resolution=ir,
             rate_config=None,
@@ -243,7 +244,7 @@ class TestPhaseTwoScan:
 
         results = await _run_phase_two_scan(
             req=req,
-            baseline=None,
+            phase1_loop=MagicMock(),
             payloads=payloads,
             intent_resolution=ir,
             rate_config=None,

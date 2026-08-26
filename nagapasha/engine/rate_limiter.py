@@ -72,6 +72,14 @@ class TokenBucketRateLimiter:
         if self._penalty_debt > 0:
             self._penalty_debt = max(0, self._penalty_debt - 0.5)
 
+    def set_tokens(self, tokens: float) -> None:
+        """Force the token count to a specific value.
+
+        Used to carry the remaining token budget from a prior scan phase into
+        the next one so a fresh PayloadLoop does not discard the phase-1 budget.
+        """
+        self._tokens = float(tokens)
+
     @property
     def total_429s(self) -> int:
         return self._total_429s

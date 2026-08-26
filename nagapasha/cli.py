@@ -266,7 +266,7 @@ def cicd(
                         console.print(f"  [yellow]Out of reach: {len(ir.out_of_reach_asks)} ask(s)[/yellow]")
                     return await _run_phase_two_scan(
                         req=req,
-                        baseline=baseline,
+                        phase1_loop=loop,
                         payloads=payloads,
                         intent_resolution=ir,
                         rate_config=rate_config,
@@ -1096,7 +1096,7 @@ def full(
                         console.print(f"  [yellow]Out of reach: {len(ir.out_of_reach_asks)} ask(s)[/yellow]")
                     return await _run_phase_two_scan(
                         req=req,
-                        baseline=baseline,
+                        phase1_loop=loop,
                         payloads=payloads,
                         intent_resolution=ir,
                         rate_config=rate_config,
@@ -1779,7 +1779,7 @@ def _filter_payloads_by_categories(
 
 async def _run_phase_two_scan(
     req: RequestModel,
-    baseline,
+    phase1_loop: PayloadLoop,
     payloads: list,
     intent_resolution,
     rate_config,
@@ -1792,6 +1792,14 @@ async def _run_phase_two_scan(
     allow_destructive: bool,
 ) -> dict:
     """Run a second (surplus) payload loop focused on intent-resolved categories.
+
+    Two-phase fixes:
+      P1-1: A fresh baseline is recaptured before phase 2 fires, so the surplus
+            scan diffs against clean baseline data rather than the one phase 1
+            already consumed for calibration/deduplication.
+      P1-2: The phase-1 runtime state (rate-limiter token budget + WAF
+            recalibration) is carried into phase 2, so phase 2 keeps the
+            calibrated rate limiter instead of rebuilding it from static config.
 
     Returns merged results dict with both phases' data.
     """
@@ -1835,10 +1843,26 @@ async def _run_phase_two_scan(
     console.print(f"\n[bold]Phase 2 — Surplus scan:[/bold] {len(surplus_payloads)} payloads")
     console.print(f"  Categories: {', '.join(resolved)}")
 
-    phase2_loop = PayloadLoop(
+    # P1-1: recapture a fresh baseline so phase 2 diffs against clean data.
+    console.print("[bold]Capturing fresh baseline for Phase 2:[/bold]")
+    try:
+        from nagapasha.engine.baseline import capture_baseline
+        baseline, _, _ = await capture_baseline(phase1_loop.runner, req, count=5)
+    except Exception as e:
+        logger.warning(
+            f"Could not recapture baseline for phase 2 ({e}); "
+            "falling back to phase-1 baseline"
+        )
+        baseline = phase1_loop.baseline
+
+    # P1-2: carry the phase-1 runtime state (rate-limiter tokens + WAF
+    # recalibration) into phase 2 so the calibrated rate limiter is preserved
+    # and phase 2 is flagged as a user-directed surplus scan.
+    phase2_loop = PayloadLoop.with_carried_runtime_state(
         request_model=req,
         baseline_fingerprint=baseline,
         payloads=surplus_payloads,
+        runtime_state=phase1_loop.export_runtime_state(),
         rate_limit_pps=rate_config.refill_rate,
         rate_limit_burst=rate_config.burst,
         max_requests=max_requests,
@@ -1847,9 +1871,10 @@ async def _run_phase_two_scan(
         allow_destructive=allow_destructive,
         host_allowlist=host_allowlist,
         restore_after=restore_after,
+        scan_phase="user_directed",
     )
 
-    phase2_results = asyncio.run(phase2_loop.run(on_result=_on_result))
+    phase2_results = await phase2_loop.run(on_result=_on_result)
 
     # Merge: phase_two results include phase_one for total counts
     phase_one_total = phase2_results.get("phase_one_total", 0)

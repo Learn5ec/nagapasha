@@ -219,12 +219,17 @@ class PayloadLoop:
         allow_irreversible_delete: bool = False,  # A5: explicit opt-in for DELETE methods
         host_allowlist: Optional[list[str]] = None,
         restore_after: bool = False,
+        scan_phase: str = "default",
     ) -> None:
         self.request_model = request_model
         self.baseline = baseline_fingerprint
         self.payloads = payloads
         self.max_requests = max_requests
         self.batch_size = batch_size
+        # Which scan phase produced this loop: "default" (full scan) or
+        # "user_directed" (intent-driven surplus scan). Carried onto every
+        # PayloadResult so findings can be attributed to their phase.
+        self.scan_phase = scan_phase
 
         # Rate limiter
         config = RateLimitConfig(
@@ -306,6 +311,54 @@ class PayloadLoop:
                 candidate.restorable = False
         self._original_body: Optional[str] = None
         self._original_method: str = request_model.method.upper()
+
+    def export_runtime_state(self) -> dict[str, Any]:
+        """Return the runtime state a later scan phase should inherit.
+
+        Two things are carried across scan phases (see the P1-1/P1-2 fix):
+          - the rate-limiter token count, so phase 2 keeps the phase-1 budget
+            instead of rebuilding a full bucket from static config;
+          - the WAF-recalibration flag, so phase 2 does not re-detect the WAF.
+        """
+        return {
+            "tokens": self.rate_limiter.current_tokens,
+            "waf_rechecked": bool(self.recalibration.state.waf_rechecked),
+        }
+
+    @classmethod
+    def with_carried_runtime_state(
+        cls,
+        *,
+        request_model: RequestModel,
+        baseline_fingerprint: BaselineFingerprint,
+        payloads: list[PayloadCandidate],
+        runtime_state: dict[str, Any],
+        **kwargs,
+    ) -> "PayloadLoop":
+        """Build a loop seeded from a prior phase's exported runtime state.
+
+        A fresh ``PayloadLoop`` is constructed as usual, then its rate limiter
+        and WAF state are re-seeded from ``runtime_state`` (see
+        ``export_runtime_state`` / ``_apply_runtime_state``). This lets phase 2
+        keep the phase-1 rate-limiter budget and WAF detection rather than
+        discarding them.
+        """
+        loop = cls(
+            request_model=request_model,
+            baseline_fingerprint=baseline_fingerprint,
+            payloads=payloads,
+            **kwargs,
+        )
+        loop._apply_runtime_state(runtime_state)
+        return loop
+
+    def _apply_runtime_state(self, state: dict[str, Any]) -> None:
+        """Re-seed the rate limiter and WAF state from a prior phase's state."""
+        tokens = state.get("tokens")
+        if tokens is not None:
+            self.rate_limiter.set_tokens(float(tokens))
+        if state.get("waf_rechecked") is not None:
+            self.recalibration.state.waf_rechecked = bool(state["waf_rechecked"])
 
     def kill(self) -> None:
         """Signal the loop to stop as soon as it can."""
@@ -477,6 +530,7 @@ class PayloadLoop:
                         delta=None,
                         elapsed=0.0,
                         error=str(r),
+                        scan_phase=self.scan_phase,
                     )
                     for candidate, r in zip(deduped_batch, results)
                 ]
@@ -516,6 +570,7 @@ class PayloadLoop:
                             delta=None,
                             elapsed=0.0,
                             error=str(e),
+                            scan_phase=self.scan_phase,
                         )
                         if on_result:
                             on_result(error_result)
@@ -699,6 +754,7 @@ class PayloadLoop:
                     delta=None,
                     elapsed=0.0,
                     hit=False,
+                    scan_phase=self.scan_phase,
                 )
 
         # A5: Irreversible delete gate — DELETE method is always destructive
@@ -717,6 +773,7 @@ class PayloadLoop:
                         delta=None,
                         elapsed=0.0,
                         hit=False,
+                        scan_phase=self.scan_phase,
                     )
                 # allow_irreversible_delete=True → allow firing
 
@@ -735,6 +792,7 @@ class PayloadLoop:
                     delta=None,
                     elapsed=0.0,
                     hit=False,
+                    scan_phase=self.scan_phase,
                 )
 
         param = candidate.parameter
@@ -769,6 +827,7 @@ class PayloadLoop:
             delta=delta,
             elapsed=elapsed,
             response_body_preview=resp.body[:200] if resp.body else "",
+            scan_phase=self.scan_phase,
         )
 
     def _build_request_with_payload(

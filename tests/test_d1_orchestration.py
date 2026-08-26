@@ -726,3 +726,199 @@ class TestEndToEndScanPipeline:
         # Scanning still ran
         assert len(result.scan_results) > 0
         assert result.total_errors == []
+
+
+# ---------------------------------------------------------------------------
+# Two-phase scan pipeline fixes — P1-1 (recapture baseline), P1-2 (carry runtime
+# state), P2-1 (scan_phase tagging).
+#
+# A single integration test drives a real phase-1 PayloadLoop and then
+# _run_phase_two_scan, patching PayloadLoop.with_carried_runtime_state to capture
+# the phase-2 loop that would otherwise be built in place. Asserts all three
+# fixes hold together with a mocked runner:
+#   P1-1  phase 2 diffs against a freshly recaptured baseline (not phase 1's)
+#   P1-2  phase 2 inherits phase 1's token budget + WAF state (not a fresh rebuild)
+#   P2-1  every phase 2 result is tagged scan_phase="user_directed"
+# ---------------------------------------------------------------------------
+
+import nagapasha.engine.payload_loop as payload_loop_mod
+
+
+class _Ph2Response:
+    status_code = 200
+    body = "MySQL syntax error near OR 1=1 in html"
+    headers = {}
+    elapsed = 0.01
+    text = body
+    url = "http://mock.local"
+
+
+class _Ph2Runner:
+    """Runner that answers 200 with an error-signature body (payloads -> HITs via
+    the real compute_delta stack) while still paying the token budget through the
+    real rate limiter.
+
+    Patched as ``nagapasha.engine.payload_loop.HttpRunner`` so BOTH the phase-1
+    loop and the captured phase-2 loop forward through this behaviour.
+    """
+
+    def __init__(self, rate_limiter=None, host_allowlist=None, **kwargs):
+        self._rate_limiter = rate_limiter
+
+    async def send(self, request_model):
+        if self._rate_limiter is not None:
+            await self._rate_limiter.acquire()
+        return _Ph2Response()
+
+    async def send_multiple(self, request_model, count=3):
+        return [await self.send(request_model) for _ in range(count)]
+
+
+class TestPhaseTwoTwoPhaseScanFixes:
+    """P1-1/P1-2/P2-1: _run_phase_two_scan recaptures, carries, and tags."""
+
+    @pytest.mark.asyncio
+    async def test_recaptures_baseline_carries_state_and_tags_results(self):
+        from types import SimpleNamespace
+        from nagapasha.engine.diff import BaselineFingerprint
+        from nagapasha.engine.rate_limiter import RateLimitConfig
+        from nagapasha.engine.payload_loop import (
+            PayloadLoop,
+            PayloadCandidate,
+            PayloadResult,
+        )
+        from nagapasha.cli import _run_phase_two_scan
+
+        param = ParameterModel(
+            name="id",
+            location="query",
+            inferred_type="int",
+            raw_value="42",
+            is_fuzz_target=True,
+            do_not_fuzz=False,
+        )
+        req = RequestModel(
+            method="GET",
+            url="https://example.com/api/item",
+            base_url="https://example.com",
+            headers={"Accept": "application/json"},
+            query_params={param.name: param.raw_value},
+            parameters=[param],
+        )
+        baseline1 = BaselineFingerprint(
+            status_code=200,
+            content_length=42,
+            body_hash="aaa",
+            avg_response_time=0.01,
+            header_names=frozenset(),
+        )
+
+        with patch.object(payload_loop_mod, "HttpRunner", _Ph2Runner):
+            phase1_payloads = [
+                PayloadCandidate(
+                    parameter=param,
+                    payload="' OR 1=1",
+                    attack_class="sql_injection",
+                ),
+                PayloadCandidate(
+                    parameter=param,
+                    payload="0",
+                    attack_class="sql_injection",
+                ),
+            ]
+            phase1 = PayloadLoop(
+                request_model=req,
+                baseline_fingerprint=baseline1,
+                payloads=phase1_payloads,
+                max_requests=10,
+                scan_phase="default",
+            )
+            await phase1.run(on_result=lambda r: None)
+
+            # P1-2 precondition: phase 1 consumed some of the token budget (the
+            # mock runner calls rate_limiter.acquire() per request).
+            exported = phase1.export_runtime_state()
+            assert 0.0 < exported["tokens"] < 10.0
+
+            # Simulate a WAF being detected during phase 1.
+            phase1.recalibration.state.waf_rechecked = True
+
+            # Capture the phase-2 loop and its carried runtime state instead of
+            # letting phase 2 run live.
+            captured: dict = {}
+            real_with_carried = PayloadLoop.with_carried_runtime_state
+
+            def wrap(*args, **kwargs):
+                loop = real_with_carried(*args, **kwargs)
+                captured["runtime_state"] = kwargs["runtime_state"]
+                # Read the token budget *before* phase 2 fires (still pre-run).
+                captured["tokens_applied"] = loop.rate_limiter.current_tokens
+                # WAF flag carried in from phase 1 (reset again later by the
+                # loop's own recalibration re-detection during run()).
+                captured["waf_applied"] = loop.recalibration.state.waf_rechecked
+                captured["loop"] = loop
+                captured["baseline"] = kwargs["baseline_fingerprint"]
+                return loop
+
+            phase2_payloads = [
+                PayloadCandidate(
+                    parameter=param,
+                    payload="' OR '1'='1",
+                    attack_class="sql_injection",
+                ),
+                PayloadCandidate(
+                    parameter=param,
+                    payload="admin'--",
+                    attack_class="sql_injection",
+                ),
+            ]
+            intent_resolution = SimpleNamespace(resolved_categories=["sql_injection"])
+            rate_config = RateLimitConfig(burst=10, refill_rate=4.0)
+
+            with patch.object(
+                payload_loop_mod.PayloadLoop,
+                "with_carried_runtime_state",
+                side_effect=wrap,
+            ):
+                phase2_out = await _run_phase_two_scan(
+                    req=req,
+                    phase1_loop=phase1,
+                    payloads=phase2_payloads,
+                    intent_resolution=intent_resolution,
+                    rate_config=rate_config,
+                    max_requests=10,
+                    batch_size=1,
+                    engagement_context=None,
+                    host_allowlist=None,
+                    restore_after=False,
+                    _on_result=lambda r: None,
+                    allow_destructive=False,
+                )
+
+        captured_loop = captured["loop"]
+
+        # --- P1-1: phase 2 recaptured a fresh baseline (differs from phase 1) ---
+        assert captured["baseline"] is not baseline1
+        assert captured_loop.baseline is captured["baseline"]
+        # Fresh baseline reflects the mock body length, not phase-1's stale 42.
+        assert captured_loop.baseline.content_length == len(_Ph2Response.body)
+
+        # --- P1-2: phase 2 inherited phase 1's token budget + WAF state (not a
+        # fresh full-burst rebuild) ---
+        assert captured["runtime_state"]["waf_rechecked"] is True
+        assert 0.0 < captured["tokens_applied"] < 10.0
+        assert captured["tokens_applied"] == pytest.approx(
+            captured["runtime_state"]["tokens"], abs=1.0
+        )
+        # WAF state carried in at build time (the loop resets it during its own
+        # recalibration re-detection in run()).
+        assert captured["waf_applied"] is True
+
+        # --- P2-1: every phase 2 result is tagged as user-directed ---
+        results = phase2_out["phase_two"]["results"]
+        assert results
+        for r in results:
+            assert r["scan_phase"] == "user_directed"
+
+        # The surplus scan produced real hits through the real detection stack.
+        assert phase2_out["phase_two"]["hits"] >= 1
