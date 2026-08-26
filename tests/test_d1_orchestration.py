@@ -452,6 +452,66 @@ class TestOrchestratorHelpers:
         assert result.baseline is not None
         assert result.baseline.status_code == 200
 
+    @pytest.mark.asyncio
+    async def test_run_phase_a_scan_fires_payloads(self):
+        """D1: _run_phase_a_scan must fire payloads via PayloadLoop."""
+        request = RequestModel(
+            method="GET",
+            url="https://api.example.com/users/1",
+            base_url="https://api.example.com",
+            parameters=[
+                ParameterModel(
+                    name="id",
+                    location="path",
+                    inferred_type="int",
+                    raw_value="1",
+                    is_fuzz_target=True,
+                    do_not_fuzz=False,
+                ),
+            ],
+        )
+        session = SessionContext(label="user_a")
+
+        runner = MagicMock()
+        orchestrator = DiscoverAndScanOrchestrator(runner=runner)
+
+        # Mock capture_baseline
+        mock_fingerprint = MagicMock()
+        mock_fingerprint.status_code = 200
+        mock_fingerprint.content_length = 100
+        mock_fingerprint.body_hash = "abc123"
+        mock_fingerprint.avg_response_time = 0.1
+
+        # Mock PayloadLoop
+        mock_loop = MagicMock()
+        mock_loop.run = AsyncMock(return_value={
+            "total_fired": 5,
+            "hits": 0,
+            "near_misses": 0,
+            "no_diff": 5,
+            "results": [],
+        })
+
+        # One fuzz payload so the loop actually runs
+        fake_candidate = MagicMock()
+
+        with patch(
+            "nagapasha.engine.baseline.capture_baseline",
+            return_value=(mock_fingerprint, False, ""),
+        ), patch(
+            "nagapasha.cli._build_technique_category_payloads",
+            return_value=[fake_candidate],
+        ), patch(
+            "nagapasha.engine.payload_loop.PayloadLoop",
+            return_value=mock_loop,
+        ):
+            result = await orchestrator._run_phase_a_scan(request, session)
+
+        # Verify the payload loop was called
+        assert mock_loop.run.called
+        # Verify the result has the baseline
+        assert result.baseline is not None
+
 
 # ---------------------------------------------------------------------------
 # Edge cases
@@ -495,3 +555,174 @@ class TestEdgeCases:
         # Should only establish 2 sessions (max_sessions)
         assert result.total_sessions == 2
         assert call_count[0] == 2
+
+
+# ---------------------------------------------------------------------------
+# End-to-end scan integration test
+# ---------------------------------------------------------------------------
+# Drives the FULL pipeline discover -> dedup -> session -> BOLA -> Phase A scan
+# against a real spec file and a mock runner, exercising the real code paths
+# for parsing, deduplication, session establishment, BOLA analysis, baseline
+# capture, and payload firing (payload loop's runner forwards to the mock).
+
+
+class _E2EResponse:
+    """Minimal response object exposing the fields the pipeline reads."""
+
+    def __init__(self, status_code: int, body: str):
+        self.status_code = status_code
+        self.body = body
+        self.headers: dict[str, str] = {}
+        self.elapsed = 0.01
+        self.url = "http://mock.local"
+
+
+class _MockRunner:
+    """Fake HttpRunner for end-to-end pipeline testing.
+
+    Login URLs (``/login``) return a bearer-token response; every other request
+    is answered 200 with the request headers echoed back into the body, so any
+    reflected payload flows through the real detection stack (compute_delta) as
+    a HIT. send_multiple backs baseline calibration.
+    """
+
+    def __init__(self):
+        self.sent: list = []
+
+    async def send(self, request_model):
+        self.sent.append(request_model)
+        if "/login" in request_model.url:
+            body = json.dumps({"access_token": "session_abc"})
+        else:
+            headers = {k.lower(): v for k, v in (request_model.headers or {}).items()}
+            body = json.dumps({"headers": headers, "message": "ok"})
+        return _E2EResponse(200, body)
+
+    async def send_multiple(self, request_model, count=3):
+        return [await self.send(request_model) for _ in range(count)]
+
+
+class _FakePayloadLoopRunner:
+    """Stand-in for payload_loop.HttpRunner that forwards to the shared mock."""
+
+    _shared = None  # set per-test to the _MockRunner instance
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def send(self, request_model):
+        return await _FakePayloadLoopRunner._shared.send(request_model)
+
+    async def send_multiple(self, request_model, count=3):
+        return await _FakePayloadLoopRunner._shared.send_multiple(request_model, count=count)
+
+
+# A spec with one auth-protected endpoint carrying a header fuzz target (for
+# BOLA + scanning) and one public health endpoint.
+E2E_SPEC = {
+    "openapi": "3.0.0",
+    "info": {"title": "E2E API", "version": "1.0.0"},
+    "servers": [{"url": "https://api.local/v1"}],
+    "paths": {
+        "/search": {
+            "get": {
+                "security": [{"bearerAuth": []}],
+                "parameters": [
+                    {"name": "X-App", "in": "header", "schema": {"type": "string"}},
+                ],
+                "responses": {"200": {"description": "OK"}},
+            }
+        },
+        "/health": {
+            "get": {"responses": {"200": {"description": "OK"}}},
+        },
+    },
+    "components": {
+        "securitySchemes": {
+            "bearerAuth": {"type": "http", "scheme": "bearer"},
+        }
+    },
+}
+
+
+class TestEndToEndScanPipeline:
+    """D1: Full pipeline discover -> dedup -> session -> BOLA -> Phase A scan."""
+
+    @pytest.mark.asyncio
+    async def test_full_pipeline_end_to_end(self, tmp_path):
+        """D1: orchestrator.run drives the full pipeline against a mock runner."""
+        spec_file = tmp_path / "spec.json"
+        spec_file.write_text(json.dumps(E2E_SPEC))
+
+        mock = _MockRunner()
+        # Route the payload loop's internal runner through the shared mock.
+        _FakePayloadLoopRunner._shared = mock
+        orchestrator = DiscoverAndScanOrchestrator(runner=mock, max_sessions=2)
+
+        with patch(
+            "nagapasha.engine.payload_loop.HttpRunner",
+            _FakePayloadLoopRunner,
+        ):
+            result = await orchestrator.run(
+                spec_urls=[str(spec_file)],
+                login_curls={
+                    "owner": "curl -X POST https://auth.local/login",
+                    "intruder": "curl -X POST https://auth.local/login",
+                },
+            )
+
+        # Step 1 + 2: parse + dedup
+        assert len(result.openapi_results) == 1
+        assert result.total_endpoints == 2
+        assert result.dedup_result.deduped_count == 2
+        assert result.dedup_result.original_count == 2
+
+        # Step 3: sessions established from login_curls
+        assert result.total_sessions == 2
+        assert {s.label for s in result.sessions} == {"owner", "intruder"}
+
+        # Step 4: BOLA checks ran (2 sessions -> 1 pair on the auth endpoint)
+        assert result.total_bola_checks >= 1
+        bola_findings = [br.finding for br in result.bola_results if br.finding]
+        assert bola_findings
+        # The finding must be a real BolaFinding, not a coroutine/dummy.
+        assert all(isinstance(f, BolaFinding) for f in bola_findings)
+
+        # Step 5: Phase A scan ran for each endpoint x session
+        assert len(result.scan_results) == 6  # 2 endpoints x (None + 2 sessions)
+        assert any(sr.total_fired > 0 for sr in result.scan_results)
+
+        # Findings: at least the BOLA finding plus scan hits
+        assert len(result.findings) >= 1
+        assert result.total_findings >= 1
+
+        # No crashes
+        assert result.total_errors == []
+        assert result.scan_end is not None
+
+    @pytest.mark.asyncio
+    async def test_full_pipeline_no_findings_without_bola(self, tmp_path):
+        """D1: With only one session, BOLA is skipped but scanning still runs."""
+        spec_file = tmp_path / "spec.json"
+        spec_file.write_text(json.dumps(E2E_SPEC))
+
+        mock = _MockRunner()
+        _FakePayloadLoopRunner._shared = mock
+        orchestrator = DiscoverAndScanOrchestrator(runner=mock, max_sessions=2)
+
+        with patch(
+            "nagapasha.engine.payload_loop.HttpRunner",
+            _FakePayloadLoopRunner,
+        ):
+            result = await orchestrator.run(
+                spec_urls=[str(spec_file)],
+                login_curls={"owner": "curl -X POST https://auth.local/login"},
+            )
+
+        # One session -> BOLA skipped
+        assert result.total_sessions == 1
+        assert result.total_bola_checks == 0
+        assert result.bola_results == []
+        # Scanning still ran
+        assert len(result.scan_results) > 0
+        assert result.total_errors == []

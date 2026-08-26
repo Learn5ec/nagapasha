@@ -106,7 +106,7 @@ async def check_bola(
         intruder_response = await runner.send(intruder_request)
 
         # Step 3: Analyze response
-        finding = _analyze_response(
+        finding = await _analyze_response(
             owner_response=owner_response,
             intruder_response=intruder_response,
             owner_session=owner_session,

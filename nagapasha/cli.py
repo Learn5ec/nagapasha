@@ -6,6 +6,7 @@ Commands:
   generate — Run parse + recon + output a standalone Phase 1 script
   run      — Execute a generated Phase 1 script
   full     — Run the full pipeline: parse → recon → targeting → generate → run
+  discover — Parse an OpenAPI spec, dedup endpoints, and output the list
 """
 
 from __future__ import annotations
@@ -1168,6 +1169,202 @@ def full(
             generated_script_path=str(script_path),
         )
         console.print(f"\n[green]Engagement saved:[/green] {eid}")
+
+
+# ---------------------------------------------------------------------------
+# Phase D command: discover — endpoint discovery from an OpenAPI spec
+# ---------------------------------------------------------------------------
+
+@app.command("discover")
+def discover(
+    spec_url: str = typer.Argument(
+        ...,
+        help="OpenAPI 3.x spec URL or file path (JSON or YAML)",
+    ),
+    crawl: bool = typer.Option(
+        False, "--crawl",
+        help="Crawl the target and merge endpoints "
+             "(crawl engine not yet implemented — spec-only)",
+    ),
+    depth: int = typer.Option(
+        1, "--depth", "-n",
+        help="Crawl depth (reserved for the crawl engine)",
+    ),
+    output: str = typer.Option(
+        "json", "--output", "-o",
+        help="Output format: json or sqlite",
+    ),
+    db_path: Optional[Path] = typer.Option(
+        None, "--db-path",
+        help="Path for --output sqlite (default: ~/.nagapasha/endpoints.db)",
+    ),
+) -> None:
+    """Discover endpoints from an OpenAPI spec: parse → (optional crawl) → dedup → output.
+
+    Parses the spec into a list of endpoints, optionally crawls and merges,
+    deduplicates by (method, path), then prints the endpoints as JSON or
+    stores them in SQLite.
+    """
+    from nagapasha.stages.stage09_openapi import (
+        parse_openapi_spec,
+        OpenAPIParseResult,
+        DiscoveredEndpoint,
+    )
+    from nagapasha.stages.stage13_target_dedup import (
+        deduplicate_endpoints,
+        DeduplicationResult,
+    )
+
+    # Optional crawl: flag accepted, but the crawl engine is not yet wired up.
+    if crawl:
+        console.print(
+            "[yellow]--crawl set: the crawl engine is not yet implemented; "
+            "proceeding with OpenAPI-derived endpoints only.[/yellow]"
+        )
+    if depth != 1:
+        console.print(
+            f"[dim]--depth {depth} noted; crawl engine not yet implemented.[/dim]"
+        )
+
+    # 1. Parse OpenAPI spec
+    console.print(f"[bold]Parsing OpenAPI spec:[/bold] {spec_url}")
+    try:
+        parse_result: OpenAPIParseResult = asyncio.run(
+            parse_openapi_spec(spec_source=spec_url, scope_checker=None)
+        )
+    except Exception as e:
+        console.print(f"[red]Failed to parse spec:[/red] {e}")
+        sys.exit(1)
+
+    endpoints = parse_result.endpoints
+    console.print(
+        f"  Found {len(endpoints)} endpoint(s)"
+        f"  • {parse_result.spec_title} v{parse_result.spec_version}"
+        f"  • base URL: {parse_result.base_url or 'n/a'}"
+    )
+
+    # 2. Crawl merge would happen here (phase B2). No-op today.
+
+    # 3. Deduplicate
+    if endpoints:
+        dedup_result = deduplicate_endpoints(endpoints)
+    else:
+        dedup_result = DeduplicationResult()
+    deduped = dedup_result.endpoints
+    console.print(
+        f"  [dim]{dedup_result.original_count} → {dedup_result.deduped_count} "
+        f"endpoints after deduplication[/dim]"
+    )
+    if not deduped:
+        console.print("[yellow]No endpoints discovered.[/yellow]")
+        return
+
+    if output == "sqlite":
+        _store_endpoints_in_sqlite(deduped, db_path)
+    else:
+        _print_endpoints_json(deduped)
+
+
+def _endpoint_to_dict(endpoint: DiscoveredEndpoint) -> dict[str, Any]:
+    """Serialize a DiscoveredEndpoint to a JSON-serializable dict."""
+    return {
+        "method": endpoint.method,
+        "path_template": endpoint.path_template,
+        "concrete_path": endpoint.concrete_path,
+        "url": endpoint.full_url(),
+        "source": endpoint.source,
+        "base_url": endpoint.base_url,
+        "risk_tags": list(endpoint.risk_tags),
+        "parameters": [
+            {
+                "name": p.name,
+                "location": p.location,
+                "inferred_type": p.inferred_type,
+                "raw_value": p.raw_value,
+                "is_fuzz_target": p.is_fuzz_target,
+                "do_not_fuzz": p.do_not_fuzz,
+            }
+            for p in endpoint.parameters
+        ],
+    }
+
+
+def _print_endpoints_json(endpoints: list[DiscoveredEndpoint]) -> None:
+    """Print discovered endpoints as JSON."""
+    payload = {
+        "endpoint_count": len(endpoints),
+        "endpoints": [_endpoint_to_dict(e) for e in endpoints],
+    }
+    console.print(json.dumps(payload, indent=2, default=str))
+
+
+def _store_endpoints_in_sqlite(
+    endpoints: list[DiscoveredEndpoint],
+    db_path: Optional[Path],
+) -> None:
+    """Store discovered endpoints into a SQLite database.
+
+    Creates the table if absent and upserts each endpoint by
+    (method, path_template).
+    """
+    import sqlite3
+
+    if db_path is None:
+        db_path = Path.home() / ".nagapasha" / "endpoints.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS discovered_endpoints (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            method        TEXT NOT NULL,
+            path_template TEXT NOT NULL,
+            concrete_path TEXT NOT NULL,
+            url           TEXT NOT NULL,
+            base_url      TEXT,
+            source        TEXT NOT NULL DEFAULT 'openapi',
+            risk_tags     TEXT,
+            parameters_json TEXT,
+            created_at    TEXT NOT NULL
+                           DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            UNIQUE (method, path_template)
+        )
+        """
+    )
+    conn.commit()
+
+    for e in endpoints:
+        conn.execute(
+            """
+            INSERT INTO discovered_endpoints
+                (method, path_template, concrete_path, url, base_url,
+                 source, risk_tags, parameters_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(method, path_template) DO UPDATE SET
+                concrete_path = excluded.concrete_path,
+                url = excluded.url,
+                base_url = excluded.base_url,
+                risk_tags = excluded.risk_tags,
+                parameters_json = excluded.parameters_json
+            """,
+            (
+                e.method,
+                e.path_template,
+                e.concrete_path,
+                e.full_url(),
+                e.base_url,
+                e.source,
+                json.dumps(list(e.risk_tags)),
+                json.dumps([_endpoint_to_dict(e)]),
+            ),
+        )
+    conn.commit()
+    conn.close()
+    console.print(
+        f"[green]Stored {len(endpoints)} endpoint(s) in SQLite:[/green] {db_path}"
+    )
 
 
 # Location priority for payload ordering (highest first)

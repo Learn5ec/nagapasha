@@ -13,6 +13,7 @@ Verifies:
 import json
 import pytest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock, AsyncMock
 from typing import Optional
 
 from nagapasha.session.session_manager import (
@@ -380,3 +381,168 @@ class TestEdgeCases:
         body = "localStorage.setItem('token', 'abc!@#$%^&*()');"
         local_storage = extract_local_storage_from_body(body)
         assert local_storage == {"token": "abc!@#$%^&*()"}
+
+
+# ---------------------------------------------------------------------------
+# establish_session — real implementation
+# ---------------------------------------------------------------------------
+
+
+class TestEstablishSession:
+    """C1: Verify establish_session with real curl parsing and session capture."""
+
+    @pytest.mark.asyncio
+    async def test_establish_session_parses_curl_and_captures_cookies(self):
+        """C1: establish_session must parse curl, fire login, capture cookies."""
+        from nagapasha.session.session_manager import establish_session
+        from nagapasha.engine.runner import HttpRunner
+
+        # Create a mock runner that returns a login response with cookies
+        mock_runner = MagicMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {
+            "set-cookie": "sessionid=abc123; Path=/; HttpOnly; Max-Age=3600",
+        }
+        mock_response.body = ""
+        mock_response.elapsed = 0.1
+        mock_runner.send = AsyncMock(return_value=mock_response)
+
+        result = await establish_session(
+            login_curl="curl -X POST https://api.example.com/login -d '{\"user\":\"test\",\"pass\":\"test\"}'",
+            runner=mock_runner,
+            label="test_user",
+        )
+
+        assert result.success is True
+        assert result.session.cookies == {"sessionid": "abc123"}
+        assert result.auth_method == "cookie"
+        assert result.session.label == "test_user"
+
+    @pytest.mark.asyncio
+    async def test_establish_session_captures_bearer_token(self):
+        """C1: establish_session must capture Bearer token from Authorization header."""
+        from nagapasha.session.session_manager import establish_session
+
+        mock_runner = MagicMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {
+            "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9...",
+        }
+        mock_response.body = ""
+        mock_response.elapsed = 0.1
+        mock_runner.send = AsyncMock(return_value=mock_response)
+
+        result = await establish_session(
+            login_curl="curl -X POST https://api.example.com/login",
+            runner=mock_runner,
+            label="api_user",
+        )
+
+        assert result.success is True
+        assert result.session.auth_header == "Bearer eyJhbGciOiJIUzI1NiJ9..."
+        assert result.auth_method == "bearer"
+
+    @pytest.mark.asyncio
+    async def test_establish_session_captures_token_from_body(self):
+        """C1: establish_session must capture token from JSON response body."""
+        from nagapasha.session.session_manager import establish_session
+
+        mock_runner = MagicMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {}
+        mock_response.body = '{"access_token": "abc123xyz"}'
+        mock_response.elapsed = 0.1
+        mock_runner.send = AsyncMock(return_value=mock_response)
+
+        result = await establish_session(
+            login_curl="curl -X POST https://api.example.com/login",
+            runner=mock_runner,
+            label="json_user",
+        )
+
+        assert result.success is True
+        assert "abc123xyz" in result.session.auth_header
+        assert result.auth_method == "bearer"
+
+    @pytest.mark.asyncio
+    async def test_establish_session_detects_expiration(self):
+        """C1: establish_session must detect expiration from Set-Cookie Max-Age."""
+        from nagapasha.session.session_manager import establish_session
+
+        mock_runner = MagicMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {
+            "set-cookie": "sessionid=xyz; Path=/; HttpOnly; Max-Age=3600",
+        }
+        mock_response.body = ""
+        mock_response.elapsed = 0.1
+        mock_runner.send = AsyncMock(return_value=mock_response)
+
+        result = await establish_session(
+            login_curl="curl -X POST https://api.example.com/login",
+            runner=mock_runner,
+            label="exp_user",
+        )
+
+        assert result.success is True
+        assert result.session.expires_at is not None
+        # Expiration should be ~1 hour from now
+        from datetime import datetime, timezone, timedelta
+        expected = datetime.now(timezone.utc) + timedelta(seconds=3600)
+        assert abs((result.session.expires_at - expected).total_seconds()) < 5
+
+    @pytest.mark.asyncio
+    async def test_establish_session_handles_failure(self):
+        """C1: establish_session must handle login failure gracefully."""
+        from nagapasha.session.session_manager import establish_session
+
+        mock_runner = MagicMock()
+        mock_runner.send = AsyncMock(side_effect=Exception("Connection refused"))
+
+        result = await establish_session(
+            login_curl="curl -X POST https://api.example.com/login",
+            runner=mock_runner,
+            label="failed_user",
+        )
+
+        assert result.success is False
+        assert "Connection refused" in result.error
+
+
+class TestParseCurl:
+    """C1: Verify curl command parsing."""
+
+    def test_parse_curl_post_with_json_body(self):
+        """C1: Parse POST curl with JSON body."""
+        from nagapasha.session.session_manager import _parse_curl
+        method, url, headers, body, body_type = _parse_curl(
+            'curl -X POST https://api.example.com/login -H "Content-Type: application/json" -d \'{"user":"test","pass":"test"}\''
+        )
+        assert method == "POST"
+        assert url == "https://api.example.com/login"
+        assert body == '{"user":"test","pass":"test"}'
+        assert body_type == "application/json"
+
+    def test_parse_curl_get_with_auth_header(self):
+        """C1: Parse GET curl with Authorization header."""
+        from nagapasha.session.session_manager import _parse_curl
+        method, url, headers, body, body_type = _parse_curl(
+            'curl -X GET https://api.example.com/data -H "Authorization: Bearer token123"'
+        )
+        assert method == "GET"
+        assert url == "https://api.example.com/data"
+        assert headers.get("Authorization") == "Bearer token123"
+
+    def test_parse_curl_with_form_data(self):
+        """C1: Parse curl with -F form data."""
+        from nagapasha.session.session_manager import _parse_curl
+        method, url, headers, body, body_type = _parse_curl(
+            'curl -X POST https://api.example.com/login -F "username=test" -F "password=pass"'
+        )
+        assert method == "POST"
+        assert url == "https://api.example.com/login"
+        assert body is not None  # Body may be parsed differently for -F

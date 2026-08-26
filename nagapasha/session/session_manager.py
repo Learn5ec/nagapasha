@@ -281,27 +281,201 @@ def detect_expiration(headers: dict[str, str], body: str) -> Optional[datetime]:
 
 async def establish_session(
     login_curl: str,
+    runner: Any,  # HttpRunner
     scope_checker: Optional[Any] = None,
     label: str = "default",
 ) -> SessionEstablishmentResult:
     """Establish a session from a login curl command.
 
+    Parses a curl-like command, extracts HTTP method/URL/headers/body,
+    fires the login request via the runner, and captures session state:
+      - Set-Cookie headers
+      - Authorization / Bearer / API-key headers
+      - JWT tokens in response body
+      - localStorage tokens (SPA-style)
+      - Expiration from Set-Cookie or response body
+
     Args:
-        login_curl: Curl command for login (e.g. "curl -X POST ...")
+        login_curl: Curl command for login (e.g. "curl -X POST https://...")
+        runner: HttpRunner for executing the login request
         scope_checker: Optional ScopeChecker for authorization gating
         label: Human-readable label for this session
 
     Returns:
         SessionEstablishmentResult with captured session state
     """
-    # TODO: Implement actual curl parsing and HTTP request
-    # For now, return a stub result
-
     result = SessionEstablishmentResult()
     result.session = SessionContext(label=label)
-    result.success = False
-    result.error = "Session establishment not yet implemented"
+
+    try:
+        # Parse the curl command into RequestModel fields
+        method, url, headers, body, body_type = _parse_curl(login_curl)
+
+        # Build the request model
+        request = RequestModel(
+            method=method,
+            url=url,
+            base_url=url,
+            headers=headers or {},
+            body=body,
+            body_type=body_type,
+        )
+
+        # Send the login request
+        response = await runner.send(request)
+
+        # Extract session state from the response
+        session = _capture_session(
+            status_code=response.status_code,
+            headers=response.headers,
+            body=response.body,
+            label=label,
+        )
+
+        result.session = session
+        result.success = bool(session.cookies or session.auth_header or session.local_storage)
+        result.auth_method = _detect_auth_method(session)
+
+    except Exception as e:
+        result.error = str(e)
+        result.success = False
+
     return result
+
+
+def _parse_curl(curl_cmd: str) -> tuple[str, str, Optional[dict[str, str]], Optional[str], Optional[str]]:
+    """Parse a curl command into HTTP method, URL, headers, body, body_type.
+
+    Supports:
+      - curl -X POST https://... -H "Key: Value" -d '{"json":"data"}'
+      - curl -X GET https://... -H "Authorization: Bearer ..."
+      - curl https://... (GET by default)
+      - curl -X POST https://... -F "key=value" (form data)
+
+    Args:
+        curl_cmd: The curl command string
+
+    Returns:
+        Tuple of (method, url, headers, body, body_type)
+    """
+    method = "GET"
+    url = ""
+    headers: dict[str, str] = {}
+    body = None
+    body_type = None
+
+    # Extract -X method
+    import re
+    method_match = re.search(r"-X\s+(\w+)", curl_cmd, re.I)
+    if method_match:
+        method = method_match.group(1).upper()
+
+    # Extract URL — regex finds the first URL-like token
+    url_match = re.search(r"(https?://\S+)", curl_cmd)
+    if url_match:
+        url = url_match.group(1)
+    else:
+        # Fallback: first positional arg that isn't a flag
+        tokens = curl_cmd.split()
+        for token in tokens:
+            if not token.startswith("-") and token != "curl":
+                url = token
+                break
+
+    # Extract headers
+    header_matches = re.findall(r'-[hH]\s+["\']([^"\']*)["\']', curl_cmd)
+    for header_str in header_matches:
+        if ":" in header_str:
+            key, value = header_str.split(":", 1)
+            headers[key.strip()] = value.strip()
+
+    # Extract body (-d or -F) — wrapper quote is captured and matched via backreference
+    data_match = re.search(r"-[dF]\s+(['\"])(.*?)\1", curl_cmd, re.S)
+    if not data_match:
+        data_match = re.search(r"-[dF]\s+(\S+)", curl_cmd, re.S)
+    if data_match:
+        body = data_match.group(2) if len(data_match.groups()) > 1 else data_match.group(1)
+        # Detect body type from Content-Type header or content
+        if headers.get("Content-Type", "").lower() == "application/json":
+            body_type = "application/json"
+        elif headers.get("Content-Type", "").lower().startswith("multipart"):
+            body_type = "multipart/form-data"
+        elif headers.get("Content-Type", ""):
+            body_type = headers["Content-Type"]
+        else:
+            # Infer from content
+            try:
+                json.loads(body)
+                body_type = "application/json"
+            except (json.JSONDecodeError, TypeError):
+                if "=" in body and "&" in body:
+                    body_type = "application/x-www-form-urlencoded"
+                else:
+                    body_type = "text/plain"
+
+    return method, url, headers, body, body_type
+
+
+def _capture_session(
+    status_code: int,
+    headers: dict[str, str],
+    body: str,
+    label: str,
+) -> SessionContext:
+    """Capture session state from a login response.
+
+    Args:
+        status_code: HTTP status code
+        headers: Response headers
+        body: Response body
+        label: Session label
+
+    Returns:
+        SessionContext with captured state
+    """
+    session = SessionContext(label=label)
+
+    # Extract cookies
+    session.cookies = extract_cookies_from_headers(headers)
+
+    # Extract auth token from response
+    token = extract_token_from_response(body, headers)
+    if token:
+        # Check if it's a Bearer token
+        if token.startswith("Bearer "):
+            session.auth_header = token
+        else:
+            session.auth_header = f"Bearer {token}"
+
+    # Extract localStorage tokens (SPA-style)
+    session.local_storage = extract_local_storage_from_body(body)
+
+    # Detect expiration
+    session.expires_at = detect_expiration(headers, body)
+
+    return session
+
+
+def _detect_auth_method(session: SessionContext) -> Optional[str]:
+    """Detect the auth method used by this session.
+
+    Args:
+        session: Captured session
+
+    Returns:
+        Auth method string (cookie, bearer, basic, jwt, or None)
+    """
+    if session.cookies:
+        return "cookie"
+    if session.auth_header:
+        if session.auth_header.startswith("Bearer "):
+            return "bearer"
+        if session.auth_header.startswith("Basic "):
+            return "basic"
+        return "custom"
+    if session.local_storage:
+        return "jwt"
+    return None
 
 
 # ---------------------------------------------------------------------------

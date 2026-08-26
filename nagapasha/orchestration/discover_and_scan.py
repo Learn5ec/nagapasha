@@ -210,6 +210,7 @@ class DiscoverAndScanOrchestrator:
                 try:
                     session_result = await establish_session(
                         login_curl=curl,
+                        runner=self.runner,
                         scope_checker=self.scope_checker,
                         label=label,
                     )
@@ -365,9 +366,55 @@ class DiscoverAndScanOrchestrator:
         )
 
         try:
-            # TODO: Implement payload firing loop
-            # This would call the payload loop with the request and baseline
-            pass
+            # Generate payloads for each fuzz target parameter
+            from nagapasha.cli import _build_technique_category_payloads
+            all_payloads: list[Any] = []  # PayloadCandidate
+
+            for param in request.parameters or []:
+                if not param.is_fuzz_target:
+                    continue
+                try:
+                    payloads = _build_technique_category_payloads(
+                        param=param,
+                        req=request,
+                        tech_stack=request.tech_stack_context.to_dict() if request.tech_stack_context else None,
+                        waf_detected=False,
+                        waf_name=None,
+                        dialect_hint=request.dialect_hint,
+                    )
+                    all_payloads.extend(payloads)
+                except Exception as e:
+                    self.runner.logger.warning(
+                        f"Failed to build payloads for {param.name}: {e}"
+                    )
+
+            if all_payloads and baseline is not None:
+                # Fire the payload loop
+                from nagapasha.engine.payload_loop import PayloadLoop
+                loop = PayloadLoop(
+                    request_model=request,
+                    baseline_fingerprint=baseline,
+                    payloads=all_payloads,
+                    rate_limit_pps=self.rate_limit.get("max_pps", 4.0) if self.rate_limit else 4.0,
+                    max_requests=self.max_requests,
+                )
+                loop_result = await loop.run()
+
+                # Collect findings from hits and near-misses
+                for result_dict in loop_result.get("results", []):
+                    finding = {
+                        "type": result_dict.get("attack_class", "unknown"),
+                        "severity": _classify_severity(result_dict.get("classification", "")),
+                        "confidence": 0.95 if result_dict.get("classification") == "HIT" else 0.6,
+                        "endpoint": f"{request.method} {request.url}",
+                        "description": f"{result_dict.get('attack_class', 'unknown')} via {result_dict.get('parameter', '')} ({result_dict.get('location', '')})",
+                        "evidence": result_dict.get("delta", {}),
+                    }
+                    scan_result.findings.append(finding)
+                    scan_result.total_fired += loop_result.get("total_fired", 0)
+            else:
+                scan_result.total_fired = 0
+
         except Exception as e:
             scan_result.errors.append(str(e))
             self.runner.logger.warning(f"Scan failed for {request.method} {request.url}: {e}")
@@ -397,3 +444,26 @@ class _SimpleConsole:
 
 
 console = _SimpleConsole()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _classify_severity(classification: str) -> str:
+    """Classify a payload result into a severity level.
+
+    Args:
+        classification: Payload classification string (HIT, NEAR-MISS, no-diff, INTERNAL-ERROR)
+
+    Returns:
+        Severity string: critical, high, medium, low, info
+    """
+    if classification == "HIT":
+        return "high"
+    if classification == "NEAR-MISS":
+        return "medium"
+    if classification == "INTERNAL-ERROR":
+        return "low"
+    return "info"
